@@ -9,3 +9,4 @@ class ProcessedObject(BaseModel):
     name: str
     position: str
     distance: str
+    normalized_box: tuple[float, float, float, float]

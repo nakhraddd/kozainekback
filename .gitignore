@@ -1,0 +1,6 @@
+yolov8n.pt
+app/services/__pycache__/detector.cpython-313.pyc
+app/domain/__pycache__/models.cpython-313.pyc
+app/domain/__pycache__/logic.cpython-313.pyc
+app/api/__pycache__/routes.cpython-313.pyc
+app/__pycache__/main.cpython-313.pyc

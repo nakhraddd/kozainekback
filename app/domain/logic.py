@@ -28,4 +28,11 @@ class SpatialAnalyzer:
         else:
             dist = "далеко"
 
-        return ProcessedObject(name=detection.name, position=pos, distance=dist)
+        norm_box = (x1 / self.w, y1 / self.h, x2 / self.w, y2 / self.h)
+
+        return ProcessedObject(
+            name=detection.name, 
+            position=pos, 
+            distance=dist, 
+            normalized_box=norm_box
+        )
