@@ -38,7 +38,13 @@ class ConnectionManager:
                     processed = [analyzer.analyze(d) for d in raw_detections]
                     
                     if processed:
-                        text_result = ", ".join([f"{p.name} {p.distance} {p.position} ({p.distance_cm:.2f}cm)" for p in processed if p.distance_cm is not None])
+                        # Modified to include objects even if distance_cm is None
+                        # and display "unknown" for distance
+                        text_result_parts = []
+                        for p in processed:
+                            distance_info = f"({p.distance_cm:.2f}cm)" if p.distance_cm is not None else "(unknown distance)"
+                            text_result_parts.append(f"{p.name} {p.distance} {p.position} {distance_info}")
+                        text_result = ", ".join(text_result_parts)
                         
                         if text_result != last_log_text:
                             logger.info(f"Detection: {text_result}")

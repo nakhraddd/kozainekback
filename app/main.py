@@ -4,7 +4,8 @@ from app.services.detector import YoloDetector
 
 app = FastAPI(title="KOZAINEK API")
 
-detector = YoloDetector()
+# Upgrading to yolov8s.pt for better accuracy
+detector = YoloDetector(model_path="yolov8s.pt")
 manager = ConnectionManager(detector=detector)
 
 @app.websocket("/ws")
