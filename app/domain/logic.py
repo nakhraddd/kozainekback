@@ -16,23 +16,26 @@ class SpatialAnalyzer:
         elif cx > 2 * self.w / 3:
             pos = "справа"
 
-        box_width = x2 - x1
-        box_height = y2 - y1
-        area = box_width * box_height
-        ratio = area / self.frame_area
-
-        if ratio > 0.4:
-            dist = "близко"
-        elif ratio > 0.1:
-            dist = "средне"
+        # Use the distance calculated by the detector
+        distance_cm = detection.distance
+        
+        # Determine descriptive distance string based on distance_cm
+        if distance_cm is not None:
+            if distance_cm < 50:
+                dist_str = "близко"
+            elif distance_cm < 200:
+                dist_str = "средне"
+            else:
+                dist_str = "далеко"
         else:
-            dist = "далеко"
+            dist_str = "неизвестно" # Fallback if distance is not calculated
 
         norm_box = (x1 / self.w, y1 / self.h, x2 / self.w, y2 / self.h)
 
         return ProcessedObject(
             name=detection.name, 
             position=pos, 
-            distance=dist, 
+            distance=dist_str, # Keep the descriptive string
+            distance_cm=distance_cm, # Add the numerical distance
             normalized_box=norm_box
         )

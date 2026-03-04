@@ -38,7 +38,7 @@ class ConnectionManager:
                     processed = [analyzer.analyze(d) for d in raw_detections]
                     
                     if processed:
-                        text_result = ", ".join([f"{p.name} {p.distance} {p.position}" for p in processed])
+                        text_result = ", ".join([f"{p.name} {p.distance} {p.position} ({p.distance_cm:.2f}cm)" for p in processed if p.distance_cm is not None])
                         
                         if text_result != last_log_text:
                             logger.info(f"Detection: {text_result}")
@@ -52,7 +52,8 @@ class ConnectionManager:
                                     "xmin": p.normalized_box[0],
                                     "ymin": p.normalized_box[1],
                                     "xmax": p.normalized_box[2],
-                                    "ymax": p.normalized_box[3]
+                                    "ymax": p.normalized_box[3],
+                                    "distance_cm": p.distance_cm
                                 } for p in processed
                             ]
                         }
