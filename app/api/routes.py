@@ -29,7 +29,6 @@ class ConnectionManager:
             while True:
                 data = await websocket.receive_bytes()
 
-                # Run the CPU-bound processing in a thread pool
                 def process_frame():
                     np_arr = np.frombuffer(data, np.uint8)
                     frame = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
@@ -41,28 +40,46 @@ class ConnectionManager:
                     analyzer = SpatialAnalyzer(frame_width=w, frame_height=h)
                     
                     raw_detections = self.detector.detect(frame)
-                    processed = [analyzer.analyze(d) for d in raw_detections]
                     
-                    if not processed:
+                    # We need both raw and processed detections to get all data
+                    processed_objects = [analyzer.analyze(d) for d in raw_detections]
+                    
+                    if not processed_objects:
                         return None
 
+                    # Combine data from raw_detections (for confidence) and processed_objects
+                    combined_data = []
+                    for raw, processed in zip(raw_detections, processed_objects):
+                        combined_data.append({
+                            "name": processed.name,
+                            "xmin": processed.normalized_box[0],
+                            "ymin": processed.normalized_box[1],
+                            "xmax": processed.normalized_box[2],
+                            "ymax": processed.normalized_box[3],
+                            "distance_cm": processed.distance_cm,
+                            "confidence": raw.confidence, # Get confidence from raw detection
+                            "position": processed.position,
+                            "distance": processed.distance
+                        })
+
                     text_result_parts = []
-                    for p in processed:
-                        distance_info = f"({p.distance_cm:.2f}cm)" if p.distance_cm is not None else "(unknown distance)"
-                        text_result_parts.append(f"{p.name} {p.distance} {p.position} {distance_info}")
+                    for p in combined_data:
+                        distance_info = f"({p['distance_cm']:.2f}cm)" if p['distance_cm'] is not None else "(unknown distance)"
+                        text_result_parts.append(f"{p['name']} {p['distance']} {p['position']} {distance_info}")
                     text_result = ", ".join(text_result_parts)
                     
                     response_data = {
                         "text": text_result,
                         "boxes": [
                             {
-                                "name": p.name,
-                                "xmin": p.normalized_box[0],
-                                "ymin": p.normalized_box[1],
-                                "xmax": p.normalized_box[2],
-                                "ymax": p.normalized_box[3],
-                                "distance_cm": p.distance_cm
-                            } for p in processed
+                                "name": p["name"],
+                                "xmin": p["xmin"],
+                                "ymin": p["ymin"],
+                                "xmax": p["xmax"],
+                                "ymax": p["ymax"],
+                                "distance_cm": p["distance_cm"],
+                                "confidence": p["confidence"] # Add confidence here
+                            } for p in combined_data
                         ]
                     }
                     return text_result, response_data
