@@ -62,46 +62,53 @@ class YoloDetector:
         self,
         model_path: str = "yolov8s.pt",
         conf_threshold: float = 0.5,
-        focal_length: float = 840,
+        focal_length: float = 1680, # Doubled to correct for "x2 less" distance error
     ):
         self.model = YOLO(model_path)
         self.conf_threshold = conf_threshold
         self.focal_length = focal_length
 
     def detect(self, frame: np.ndarray) -> List[DetectionResult]:
-        results = self.model(frame, verbose=False)
+        # Updated inference call with optimized arguments
+        results = self.model(
+            frame, 
+            verbose=False,
+            rect=True,       # Helps with non-square aspect ratios (fixes misplaced boxes)
+            imgsz=640,       # Ensures consistent input size
+            conf=self.conf_threshold, # Filters low confidence detections efficiently
+            iou=0.7          # Default NMS threshold
+        )
         detections = []
         
         for r in results:
             for box in r.boxes:
+                # Confidence is already filtered by the model, but we retrieve it here
                 conf = float(box.conf[0])
-                if conf > self.conf_threshold:
-                    cls_id = int(box.cls[0])
-                    english_name = self.model.names[cls_id]
-                    
-                    # Translate the name to Russian, fallback to English
-                    name = RUSSIAN_NAMES.get(english_name, english_name)
-                    
-                    x1, y1, x2, y2 = box.xyxy[0]
-                    coords = (float(x1), float(y1), float(x2), float(y2))
-                    
-                    distance = None
-                    
-                    # Use the original English name to look up the width
-                    known_width = KNOWN_OBJECT_WIDTHS.get(english_name)
-                    
-                    if known_width is not None:
-                        pixel_width = x2 - x1
-                        if pixel_width > 0:
-                            distance = (known_width * self.focal_length) / pixel_width
-                    
-                    detections.append(
-                        DetectionResult(
-                            name=name, # Use the translated name
-                            confidence=conf,
-                            box_coordinates=coords,
-                            distance=float(distance) if distance is not None else None,
-                        )
+                
+                cls_id = int(box.cls[0])
+                english_name = self.model.names[cls_id]
+                
+                name = RUSSIAN_NAMES.get(english_name, english_name)
+                
+                x1, y1, x2, y2 = box.xyxy[0]
+                coords = (float(x1), float(y1), float(x2), float(y2))
+                
+                distance = None
+                
+                known_width = KNOWN_OBJECT_WIDTHS.get(english_name)
+                
+                if known_width is not None:
+                    pixel_width = x2 - x1
+                    if pixel_width > 0:
+                        distance = (known_width * self.focal_length) / pixel_width
+                
+                detections.append(
+                    DetectionResult(
+                        name=name,
+                        confidence=conf,
+                        box_coordinates=coords,
+                        distance=float(distance) if distance is not None else None,
                     )
+                )
                     
         return detections
