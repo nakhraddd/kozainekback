@@ -1,3 +1,4 @@
+import cv2
 from typing import Protocol, List
 import numpy as np
 from ultralytics import YOLO
@@ -60,7 +61,7 @@ RUSSIAN_NAMES = {
 class YoloDetector:
     def __init__(
         self,
-        model_path: str = "yolov8s-seg.pt",
+        model_path: str = "yolov8n-seg.pt",
         conf_threshold: float = 0.5,
         focal_length: float = 1680,
     ):
@@ -69,22 +70,53 @@ class YoloDetector:
         self.focal_length = focal_length
 
     def detect(self, frame: np.ndarray) -> List[DetectionResult]:
-        # Use model.track() for object tracking
+        # --- Canny + Hough Transform for obstacle detection ---
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        edges = cv2.Canny(gray, 50, 150, apertureSize=3)
+        
+        h, w = frame.shape[:2]
+        roi_w_start = w // 3
+        roi_w_end = 2 * w // 3
+        roi = edges[:, roi_w_start:roi_w_end]
+        
+        lines = cv2.HoughLinesP(roi, 1, np.pi / 180, threshold=100, minLineLength=h*0.3, maxLineGap=20)
+        
+        vertical_lines = []
+        if lines is not None:
+            for line in lines:
+                x1, y1, x2, y2 = line[0]
+                if abs(x1 - x2) < 10:
+                    vertical_lines.append(line)
+
+        obstacle_detections = []
+        if len(vertical_lines) > 0:
+            obstacle_box = (float(roi_w_start), 0.0, float(roi_w_end), float(h))
+            obstacle_detections.append(
+                DetectionResult(
+                    name="Caution! Possible obstacle ahead",
+                    confidence=0.9,
+                    box_coordinates=obstacle_box,
+                    distance=None,
+                    mask_points=[],
+                    track_id=None
+                )
+            )
+
+        # --- YOLO object detection ---
         results = self.model.track(
             frame, 
-            persist=True, # Persist tracks between frames
+            persist=True,
             verbose=False,
             rect=True,
             imgsz=640,
             conf=self.conf_threshold,
             iou=0.7
         )
-        detections = []
+        yolo_detections = []
         
         for r in results:
             img_height, img_width = r.orig_shape
             
-            # Check if any objects were detected and tracked
             if r.boxes.id is None:
                 continue
 
@@ -116,7 +148,7 @@ class YoloDetector:
                             normalized_polygon = polygon / np.array([img_width, img_height])
                             mask_points = normalized_polygon.tolist()
                 
-                detections.append(
+                yolo_detections.append(
                     DetectionResult(
                         name=name,
                         confidence=conf,
@@ -127,4 +159,4 @@ class YoloDetector:
                     )
                 )
                     
-        return detections
+        return obstacle_detections + yolo_detections
