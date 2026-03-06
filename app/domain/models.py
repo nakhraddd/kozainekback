@@ -12,3 +12,4 @@ class ProcessedObject(BaseModel):
     distance: str
     distance_cm: float | None = None
     normalized_box: tuple[float, float, float, float]
+    priority: int | None = None

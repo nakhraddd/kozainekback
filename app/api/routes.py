@@ -6,6 +6,8 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from app.services.detector import ObjectDetector
 from app.domain.logic import SpatialAnalyzer
 from starlette.concurrency import run_in_threadpool
+from app.domain.priorities import HIGH_PRIORITY_OBJECTS, MEDIUM_PRIORITY_OBJECTS
+from app.domain.message_formatter import format_message, RUSSIAN_NAMES
 
 logging.basicConfig(
     level=logging.INFO,
@@ -15,6 +17,14 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+def get_priority_level(english_name: str) -> int:
+    if english_name in HIGH_PRIORITY_OBJECTS:
+        return 3
+    elif english_name in MEDIUM_PRIORITY_OBJECTS:
+        return 2
+    else:
+        return 1
 
 class ConnectionManager:
     def __init__(self, detector: ObjectDetector):
@@ -41,45 +51,45 @@ class ConnectionManager:
                     
                     raw_detections = self.detector.detect(frame)
                     
-                    # We need both raw and processed detections to get all data
-                    processed_objects = [analyzer.analyze(d) for d in raw_detections]
-                    
-                    if not processed_objects:
+                    if not raw_detections:
                         return None
 
-                    # Combine data from raw_detections (for confidence) and processed_objects
-                    combined_data = []
-                    for raw, processed in zip(raw_detections, processed_objects):
-                        combined_data.append({
-                            "name": processed.name,
-                            "xmin": processed.normalized_box[0],
-                            "ymin": processed.normalized_box[1],
-                            "xmax": processed.normalized_box[2],
-                            "ymax": processed.normalized_box[3],
-                            "distance_cm": processed.distance_cm,
-                            "confidence": raw.confidence, # Get confidence from raw detection
-                            "position": processed.position,
-                            "distance": processed.distance
+                    combined_objects = []
+                    for raw_det in raw_detections:
+                        processed_obj = analyzer.analyze(raw_det)
+                        
+                        # Get the original English name for priority checking
+                        # Reverse lookup from Russian name if needed, or use name directly
+                        english_name = next((en for en, ru in RUSSIAN_NAMES.items() if ru == processed_obj.name), processed_obj.name)
+                        
+                        priority = get_priority_level(english_name)
+
+                        combined_objects.append({
+                            "processed": processed_obj,
+                            "confidence": raw_det.confidence,
+                            "priority": priority
                         })
 
-                    text_result_parts = []
-                    for p in combined_data:
-                        distance_info = f"({p['distance_cm']:.2f}cm)" if p['distance_cm'] is not None else "(unknown distance)"
-                        text_result_parts.append(f"{p['name']} {p['distance']} {p['position']} {distance_info}")
-                    text_result = ", ".join(text_result_parts)
+                    # Sort by priority (descending)
+                    combined_objects.sort(key=lambda x: x["priority"], reverse=True)
+
+                    sorted_processed_objects = [item["processed"] for item in combined_objects]
+
+                    text_result = format_message(sorted_processed_objects)
                     
                     response_data = {
                         "text": text_result,
                         "boxes": [
                             {
-                                "name": p["name"],
-                                "xmin": p["xmin"],
-                                "ymin": p["ymin"],
-                                "xmax": p["xmax"],
-                                "ymax": p["ymax"],
-                                "distance_cm": p["distance_cm"],
-                                "confidence": p["confidence"] # Add confidence here
-                            } for p in combined_data
+                                "name": item["processed"].name,
+                                "xmin": item["processed"].normalized_box[0],
+                                "ymin": item["processed"].normalized_box[1],
+                                "xmax": item["processed"].normalized_box[2],
+                                "ymax": item["processed"].normalized_box[3],
+                                "distance_cm": item["processed"].distance_cm,
+                                "confidence": item["confidence"],
+                                "priority": item["priority"] # Added priority here
+                            } for item in combined_objects
                         ]
                     }
                     return text_result, response_data
