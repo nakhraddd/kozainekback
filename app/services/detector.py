@@ -60,29 +60,34 @@ RUSSIAN_NAMES = {
 class YoloDetector:
     def __init__(
         self,
-        model_path: str = "yolov8s.pt",
+        model_path: str = "yolov8s-seg.pt", # Switched to segmentation model
         conf_threshold: float = 0.5,
-        focal_length: float = 1680, # Doubled to correct for "x2 less" distance error
+        focal_length: float = 1680,
     ):
         self.model = YOLO(model_path)
         self.conf_threshold = conf_threshold
         self.focal_length = focal_length
 
     def detect(self, frame: np.ndarray) -> List[DetectionResult]:
-        # Updated inference call with optimized arguments
         results = self.model(
             frame, 
             verbose=False,
-            rect=True,       # Helps with non-square aspect ratios (fixes misplaced boxes)
-            imgsz=640,       # Ensures consistent input size
-            conf=self.conf_threshold, # Filters low confidence detections efficiently
-            iou=0.7          # Default NMS threshold
+            rect=True,
+            imgsz=640,
+            conf=self.conf_threshold,
+            iou=0.7
         )
         detections = []
         
         for r in results:
-            for box in r.boxes:
-                # Confidence is already filtered by the model, but we retrieve it here
+            img_height, img_width = r.orig_shape
+            
+            # Check if masks are present
+            if r.masks is None:
+                continue
+
+            for i, mask in enumerate(r.masks):
+                box = r.boxes[i]
                 conf = float(box.conf[0])
                 
                 cls_id = int(box.cls[0])
@@ -94,13 +99,18 @@ class YoloDetector:
                 coords = (float(x1), float(y1), float(x2), float(y2))
                 
                 distance = None
-                
                 known_width = KNOWN_OBJECT_WIDTHS.get(english_name)
-                
                 if known_width is not None:
                     pixel_width = x2 - x1
                     if pixel_width > 0:
                         distance = (known_width * self.focal_length) / pixel_width
+
+                # Extract and normalize mask points
+                mask_points = []
+                if mask.xy.size > 0:
+                    # Normalize the polygon points by the image dimensions
+                    normalized_polygon = mask.xy[0] / np.array([img_width, img_height])
+                    mask_points = normalized_polygon.tolist()
                 
                 detections.append(
                     DetectionResult(
@@ -108,6 +118,7 @@ class YoloDetector:
                         confidence=conf,
                         box_coordinates=coords,
                         distance=float(distance) if distance is not None else None,
+                        mask_points=mask_points
                     )
                 )
                     

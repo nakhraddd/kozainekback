@@ -58,8 +58,6 @@ class ConnectionManager:
                     for raw_det in raw_detections:
                         processed_obj = analyzer.analyze(raw_det)
                         
-                        # Get the original English name for priority checking
-                        # Reverse lookup from Russian name if needed, or use name directly
                         english_name = next((en for en, ru in RUSSIAN_NAMES.items() if ru == processed_obj.name), processed_obj.name)
                         
                         priority = get_priority_level(english_name)
@@ -70,7 +68,6 @@ class ConnectionManager:
                             "priority": priority
                         })
 
-                    # Sort by priority (descending)
                     combined_objects.sort(key=lambda x: x["priority"], reverse=True)
 
                     sorted_processed_objects = [item["processed"] for item in combined_objects]
@@ -88,7 +85,8 @@ class ConnectionManager:
                                 "ymax": item["processed"].normalized_box[3],
                                 "distance_cm": item["processed"].distance_cm,
                                 "confidence": item["confidence"],
-                                "priority": item["priority"] # Added priority here
+                                "priority": item["priority"],
+                                "mask_points": item["processed"].normalized_mask_points # Added mask points
                             } for item in combined_objects
                         ]
                     }
