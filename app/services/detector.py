@@ -69,8 +69,10 @@ class YoloDetector:
         self.focal_length = focal_length
 
     def detect(self, frame: np.ndarray) -> List[DetectionResult]:
-        results = self.model(
+        # Use model.track() for object tracking
+        results = self.model.track(
             frame, 
+            persist=True, # Persist tracks between frames
             verbose=False,
             rect=True,
             imgsz=640,
@@ -82,12 +84,12 @@ class YoloDetector:
         for r in results:
             img_height, img_width = r.orig_shape
             
-            # Check if masks are present
-            if r.masks is None:
+            # Check if any objects were detected and tracked
+            if r.boxes.id is None:
                 continue
 
-            for i, mask in enumerate(r.masks):
-                box = r.boxes[i]
+            for i, box in enumerate(r.boxes):
+                track_id = int(box.id[0])
                 conf = float(box.conf[0])
                 
                 cls_id = int(box.cls[0])
@@ -105,16 +107,14 @@ class YoloDetector:
                     if pixel_width > 0:
                         distance = (known_width * self.focal_length) / pixel_width
 
-                # Extract and normalize mask points
                 mask_points = []
-                # mask.xy is a list of arrays (one for each polygon in the mask)
-                # We take the first one as it corresponds to the main object
-                if len(mask.xy) > 0:
-                    polygon = mask.xy[0] # This is a numpy array of shape (N, 2)
-                    if polygon.size > 0:
-                        # Normalize the polygon points by the image dimensions
-                        normalized_polygon = polygon / np.array([img_width, img_height])
-                        mask_points = normalized_polygon.tolist()
+                if r.masks and i < len(r.masks):
+                    mask = r.masks[i]
+                    if len(mask.xy) > 0:
+                        polygon = mask.xy[0]
+                        if polygon.size > 0:
+                            normalized_polygon = polygon / np.array([img_width, img_height])
+                            mask_points = normalized_polygon.tolist()
                 
                 detections.append(
                     DetectionResult(
@@ -122,7 +122,8 @@ class YoloDetector:
                         confidence=conf,
                         box_coordinates=coords,
                         distance=float(distance) if distance is not None else None,
-                        mask_points=mask_points
+                        mask_points=mask_points,
+                        track_id=track_id
                     )
                 )
                     

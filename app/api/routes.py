@@ -86,7 +86,8 @@ class ConnectionManager:
                                 "distance_cm": item["processed"].distance_cm,
                                 "confidence": item["confidence"],
                                 "priority": item["priority"],
-                                "mask_points": item["processed"].normalized_mask_points # Added mask points
+                                "mask_points": item["processed"].normalized_mask_points,
+                                "track_id": item["processed"].track_id # Added track_id
                             } for item in combined_objects
                         ]
                     }

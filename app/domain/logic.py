@@ -30,8 +30,6 @@ class SpatialAnalyzer:
 
         norm_box = (x1 / self.w, y1 / self.h, x2 / self.w, y2 / self.h)
 
-        # Pass through the normalized mask points
-        # Note: detector.py already normalizes them, so we just pass them along
         normalized_mask_points = detection.mask_points
 
         return ProcessedObject(
@@ -40,5 +38,6 @@ class SpatialAnalyzer:
             distance=dist_str, 
             distance_cm=distance_cm,
             normalized_box=norm_box,
-            normalized_mask_points=normalized_mask_points # Added mask points
+            normalized_mask_points=normalized_mask_points,
+            track_id=detection.track_id # Added track_id
         )

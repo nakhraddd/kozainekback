@@ -6,7 +6,8 @@ class DetectionResult(BaseModel):
     confidence: float
     box_coordinates: tuple[float, float, float, float]
     distance: Optional[float] = None
-    mask_points: Optional[List[List[float]]] = None # Added for segmentation masks
+    mask_points: Optional[List[List[float]]] = None
+    track_id: Optional[int] = None # Added track_id
     
 class ProcessedObject(BaseModel):
     name: str
@@ -15,4 +16,5 @@ class ProcessedObject(BaseModel):
     distance_cm: Optional[float] = None
     normalized_box: tuple[float, float, float, float]
     priority: Optional[int] = None
-    normalized_mask_points: Optional[List[List[float]]] = None # Added for normalized segmentation masks
+    normalized_mask_points: Optional[List[List[float]]] = None
+    track_id: Optional[int] = None # Added track_id
