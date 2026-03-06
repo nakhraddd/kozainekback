@@ -60,7 +60,7 @@ RUSSIAN_NAMES = {
 class YoloDetector:
     def __init__(
         self,
-        model_path: str = "yolov8s-seg.pt", # Switched to segmentation model
+        model_path: str = "yolov8s-seg.pt",
         conf_threshold: float = 0.5,
         focal_length: float = 1680,
     ):
@@ -107,10 +107,14 @@ class YoloDetector:
 
                 # Extract and normalize mask points
                 mask_points = []
-                if mask.xy.size > 0:
-                    # Normalize the polygon points by the image dimensions
-                    normalized_polygon = mask.xy[0] / np.array([img_width, img_height])
-                    mask_points = normalized_polygon.tolist()
+                # mask.xy is a list of arrays (one for each polygon in the mask)
+                # We take the first one as it corresponds to the main object
+                if len(mask.xy) > 0:
+                    polygon = mask.xy[0] # This is a numpy array of shape (N, 2)
+                    if polygon.size > 0:
+                        # Normalize the polygon points by the image dimensions
+                        normalized_polygon = polygon / np.array([img_width, img_height])
+                        mask_points = normalized_polygon.tolist()
                 
                 detections.append(
                     DetectionResult(
