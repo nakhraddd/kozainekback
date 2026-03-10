@@ -29,7 +29,7 @@ KNOWN_OBJECT_WIDTHS = {
     "cell phone": 7.0, "microwave": 50.0, "oven": 60.0, "toaster": 25.0,
     "sink": 50.0, "refrigerator": 70.0, "book": 15.0, "clock": 30.0,
     "vase": 15.0, "scissors": 8.0, "teddy bear": 30.0, "hair drier": 10.0,
-    "toothbrush": 2.0, "A4 paper": 21.0
+    "toothbrush": 2.0, "A4 paper": 21.0, "stairs": 100.0
 }
 
 # English to Russian translation dictionary
@@ -55,7 +55,7 @@ RUSSIAN_NAMES = {
     "microwave": "микроволновка", "oven": "духовка", "toaster": "тостер", "sink": "раковина",
     "refrigerator": "холодильник", "book": "книга", "clock": "часы", "vase": "ваза",
     "scissors": "ножницы", "teddy bear": "плюшевый мишка", "hair drier": "фен",
-    "toothbrush": "зубная щетка", "A4 paper": "бумага А4"
+    "toothbrush": "зубная щетка", "A4 paper": "бумага А4", "stairs": "лестница"
 }
 
 class YoloDetector:
@@ -96,6 +96,28 @@ class YoloDetector:
                     name="Caution! Possible obstacle ahead",
                     confidence=0.9,
                     box_coordinates=obstacle_box,
+                    distance=None,
+                    mask_points=[],
+                    track_id=None
+                )
+            )
+
+        # --- Stairs detection ---
+        lines = cv2.HoughLinesP(edges, 1, np.pi / 180, threshold=80, minLineLength=w*0.4, maxLineGap=20)
+        horizontal_lines = []
+        if lines is not None:
+            for line in lines:
+                x1, y1, x2, y2 = line[0]
+                if abs(y1 - y2) < 10:
+                    horizontal_lines.append(line)
+        
+        if len(horizontal_lines) > 4:
+            stairs_box = (0.0, 0.0, float(w), float(h))
+            obstacle_detections.append(
+                DetectionResult(
+                    name="stairs",
+                    confidence=0.95,
+                    box_coordinates=stairs_box,
                     distance=None,
                     mask_points=[],
                     track_id=None

@@ -9,7 +9,8 @@ HIGH_PRIORITY_OBJECTS = {
     "truck",
     "dog",
     "traffic light",
-    "stop sign"
+    "stop sign",
+    "stairs"
 }
 
 MEDIUM_PRIORITY_OBJECTS = {
