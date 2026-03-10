@@ -26,6 +26,7 @@ def get_priority_level(english_name: str) -> int:
     else:
         return 1
 
+
 class ConnectionManager:
     def __init__(self, detector: ObjectDetector):
         self.detector = detector
@@ -34,32 +35,41 @@ class ConnectionManager:
         await websocket.accept()
         logger.info("Client connected to WebSocket.")
         last_log_text = ""
-        
+        frame_counter = 0  # Initialize frame counter
+
         try:
             while True:
+                # 1. Wait to receive a frame
                 data = await websocket.receive_bytes()
+                frame_counter += 1
 
+                # Skip frames if not the 8th frame
+                if frame_counter % 5 != 0:
+                    continue
+
+                # Define the frame processing logic (blocking part)
                 def process_frame():
                     np_arr = np.frombuffer(data, np.uint8)
                     frame = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
-                    
+
                     if frame is None:
                         return None
 
                     h, w, _ = frame.shape
                     analyzer = SpatialAnalyzer(frame_width=w, frame_height=h)
-                    
+
                     raw_detections = self.detector.detect(frame)
-                    
+
                     if not raw_detections:
                         return None
 
                     combined_objects = []
                     for raw_det in raw_detections:
                         processed_obj = analyzer.analyze(raw_det)
-                        
-                        english_name = next((en for en, ru in RUSSIAN_NAMES.items() if ru == processed_obj.name), processed_obj.name)
-                        
+
+                        english_name = next((en for en, ru in RUSSIAN_NAMES.items() if ru == processed_obj.name),
+                                            processed_obj.name)
+
                         priority = get_priority_level(english_name)
 
                         combined_objects.append({
@@ -73,7 +83,7 @@ class ConnectionManager:
                     sorted_processed_objects = [item["processed"] for item in combined_objects]
 
                     text_result = format_message(sorted_processed_objects)
-                    
+
                     response_data = {
                         "text": text_result,
                         "boxes": [
@@ -87,20 +97,22 @@ class ConnectionManager:
                                 "confidence": item["confidence"],
                                 "priority": item["priority"],
                                 "mask_points": item["processed"].normalized_mask_points,
-                                "track_id": item["processed"].track_id # Added track_id
+                                "track_id": item["processed"].track_id
                             } for item in combined_objects
                         ]
                     }
                     return text_result, response_data
 
+                # 2. Process that frame in a thread pool (blocking call offloaded)
                 result = await run_in_threadpool(process_frame)
 
+                # 3. Send the result back if processing was successful
                 if result:
                     text_result, response_data = result
                     if text_result != last_log_text:
                         logger.info(f"Detection: {text_result}")
                         last_log_text = text_result
-                    
+
                     await websocket.send_text(json.dumps(response_data))
 
         except WebSocketDisconnect:
