@@ -35,7 +35,7 @@ class ConnectionManager:
         await websocket.accept()
         logger.info("Client connected to WebSocket.")
         last_log_text = ""
-        frame_counter = 0  # Initialize frame counter
+        frame_counter = 0
 
         try:
             while True:
@@ -43,7 +43,7 @@ class ConnectionManager:
                 data = await websocket.receive_bytes()
                 frame_counter += 1
 
-                # Skip frames if not the 8th frame
+                # Skip frames if not the th frame
                 if frame_counter % 5 != 0:
                     continue
 
@@ -89,14 +89,14 @@ class ConnectionManager:
                         "boxes": [
                             {
                                 "name": item["processed"].name,
-                                "xmin": item["processed"].normalized_box[0],
-                                "ymin": item["processed"].normalized_box[1],
-                                "xmax": item["processed"].normalized_box[2],
-                                "ymax": item["processed"].normalized_box[3],
-                                "distance_cm": item["processed"].distance_cm,
-                                "confidence": item["confidence"],
+                                "xmin": round(item["processed"].normalized_box[0], 4),
+                                "ymin": round(item["processed"].normalized_box[1], 4),
+                                "xmax": round(item["processed"].normalized_box[2], 4),
+                                "ymax": round(item["processed"].normalized_box[3], 4),
+                                "distance_cm": round(item["processed"].distance_cm, 2) if item["processed"].distance_cm is not None else None,
+                                "confidence": round(item["confidence"], 4),
                                 "priority": item["priority"],
-                                "mask_points": item["processed"].normalized_mask_points,
+                                "mask_points": [[round(p, 4) for p in point] for point in item["processed"].normalized_mask_points] if item["processed"].normalized_mask_points else None,
                                 "track_id": item["processed"].track_id
                             } for item in combined_objects
                         ]

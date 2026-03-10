@@ -153,7 +153,7 @@ class YoloDetector:
                         name=name,
                         confidence=conf,
                         box_coordinates=coords,
-                        distance=float(distance) if distance is not None else None,
+                        distance=distance,
                         mask_points=mask_points,
                         track_id=track_id
                     )
