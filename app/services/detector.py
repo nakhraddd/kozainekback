@@ -62,7 +62,7 @@ RUSSIAN_NAMES = {
 class YoloDetector:
     def __init__(
         self,
-        model_path: str = "yolov8n-seg.pt",
+        model_path: str = "yolov8s-seg.pt",
         conf_threshold: float = 0.5,
         focal_length: float = 1680,
     ):

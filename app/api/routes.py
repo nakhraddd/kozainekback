@@ -18,6 +18,7 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
+
 def get_priority_level(english_name: str) -> int:
     if english_name in HIGH_PRIORITY_OBJECTS:
         return 3
@@ -30,41 +31,75 @@ def get_priority_level(english_name: str) -> int:
 class ConnectionManager:
     def __init__(self, detector: ObjectDetector):
         self.detector = detector
+        self.previous_tracked_objects = set()
+        self.previous_static_objects = set()
+        self.last_processed_frame = None
 
     async def handle_ws(self, websocket: WebSocket):
         await websocket.accept()
         logger.info("Client connected to WebSocket.")
         last_log_text = ""
-        frame_counter = 0
 
         try:
             while True:
                 # 1. Wait to receive a frame
                 data = await websocket.receive_bytes()
-                frame_counter += 1
+                np_arr = np.frombuffer(data, np.uint8)
+                frame = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
 
-                # Skip frames if not the th frame
-                if frame_counter % 5 != 0:
+                if frame is None:
                     continue
+
+                # Frame comparison for smart throttling
+                if self.last_processed_frame is not None:
+                    diff = cv2.absdiff(frame, self.last_processed_frame)
+                    non_zero_count = np.count_nonzero(diff)
+                    change_percentage = non_zero_count / (frame.shape[0] * frame.shape[1])
+                    
+                    if change_percentage < 0.1: # 10% change threshold for static scenes
+                        continue
+                    elif change_percentage > 0.8: # 80% change threshold for scene change
+                        self.previous_tracked_objects.clear()
+                        self.previous_static_objects.clear()
 
                 # Define the frame processing logic (blocking part)
                 def process_frame():
-                    np_arr = np.frombuffer(data, np.uint8)
-                    frame = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
-
-                    if frame is None:
-                        return None
-
                     h, w, _ = frame.shape
                     analyzer = SpatialAnalyzer(frame_width=w, frame_height=h)
 
                     raw_detections = self.detector.detect(frame)
 
                     if not raw_detections:
+                        self.previous_tracked_objects.clear()
+                        self.previous_static_objects.clear()
                         return None
 
-                    combined_objects = []
+                    current_tracked_objects = set()
+                    current_static_objects = set()
+                    new_objects = []
+
                     for raw_det in raw_detections:
+                        processed_obj = analyzer.analyze(raw_det)
+
+                        if processed_obj.track_id is not None:
+                            current_tracked_objects.add(processed_obj.track_id)
+                            if processed_obj.track_id not in self.previous_tracked_objects:
+                                new_objects.append(raw_det)
+                        else:
+                            current_static_objects.add(processed_obj.name)
+                            if processed_obj.name not in self.previous_static_objects:
+                                new_objects.append(raw_det)
+
+                    self.previous_tracked_objects = current_tracked_objects
+                    self.previous_static_objects = current_static_objects
+
+                    if not new_objects:
+                        return None
+
+                    self.last_processed_frame = frame.copy()
+
+                    combined_objects = []
+                    for raw_det in new_objects:
                         processed_obj = analyzer.analyze(raw_det)
 
                         english_name = next((en for en, ru in RUSSIAN_NAMES.items() if ru == processed_obj.name),
@@ -93,10 +128,13 @@ class ConnectionManager:
                                 "ymin": round(item["processed"].normalized_box[1], 4),
                                 "xmax": round(item["processed"].normalized_box[2], 4),
                                 "ymax": round(item["processed"].normalized_box[3], 4),
-                                "distance_cm": round(item["processed"].distance_cm, 2) if item["processed"].distance_cm is not None else None,
+                                "distance_cm": round(item["processed"].distance_cm, 2) if item[
+                                                                                              "processed"].distance_cm is not None else None,
                                 "confidence": round(item["confidence"], 4),
                                 "priority": item["priority"],
-                                "mask_points": [[round(p, 4) for p in point] for point in item["processed"].normalized_mask_points] if item["processed"].normalized_mask_points else None,
+                                "mask_points": [[round(p, 4) for p in point] for point in
+                                                item["processed"].normalized_mask_points] if item[
+                                    "processed"].normalized_mask_points else None,
                                 "track_id": item["processed"].track_id
                             } for item in combined_objects
                         ]
