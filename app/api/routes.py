@@ -39,6 +39,9 @@ class ConnectionManager:
         await websocket.accept()
         logger.info("Client connected to WebSocket.")
         last_log_text = ""
+        
+        # Define a standard empty response to use as a heartbeat
+        empty_response = json.dumps({"text": "", "boxes": []})
 
         try:
             while True:
@@ -48,6 +51,7 @@ class ConnectionManager:
                 frame = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
 
                 if frame is None:
+                    await websocket.send_text(empty_response) # Send heartbeat if frame is invalid
                     continue
 
                 # Frame comparison for smart throttling
@@ -57,6 +61,7 @@ class ConnectionManager:
                     change_percentage = non_zero_count / (frame.shape[0] * frame.shape[1])
                     
                     if change_percentage < 0.1: # 10% change threshold for static scenes
+                        await websocket.send_text(empty_response) # Send heartbeat for static scenes
                         continue
                     elif change_percentage > 0.8: # 80% change threshold for scene change
                         self.previous_tracked_objects.clear()
@@ -152,6 +157,9 @@ class ConnectionManager:
                         last_log_text = text_result
 
                     await websocket.send_text(json.dumps(response_data))
+                else:
+                    # Send a heartbeat if processing resulted in no new objects
+                    await websocket.send_text(empty_response)
 
         except WebSocketDisconnect:
             logger.info("Client disconnected from WebSocket.")
