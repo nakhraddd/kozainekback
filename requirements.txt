@@ -4,3 +4,6 @@ ultralytics
 opencv-python
 websockets
 numpy
+Pillow
+pyngrok
+httpx
