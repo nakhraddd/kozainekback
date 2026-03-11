@@ -25,7 +25,8 @@ RUSSIAN_NAMES = {
     "microwave": "микроволновка", "oven": "духовка", "toaster": "тостер", "sink": "раковина",
     "refrigerator": "холодильник", "book": "книга", "clock": "часы", "vase": "ваза",
     "scissors": "ножницы", "teddy bear": "плюшевый мишка", "hair drier": "фен",
-    "toothbrush": "зубная щетка", "A4 paper": "бумага А4"
+    "toothbrush": "зубная щетка", "A4 paper": "бумага А4", "stairs": "лестница",
+    "Caution! Possible obstacle ahead": "Внимание! Возможное припятсвие впереди"
 }
 
 def format_message(processed_objects: List[ProcessedObject]) -> str:
