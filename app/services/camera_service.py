@@ -42,7 +42,7 @@ class CameraService:
 
         while True:
             current_time = asyncio.get_event_loop().time()
-
+            
             # Refresh list every 2 seconds
             if current_time - last_fetch_time > 2.0:
                 try:
@@ -55,7 +55,7 @@ class CameraService:
 
                 if not fetched_cameras:
                     fetched_cameras = [{"id": "local_0", "name": "Local Webcam (Fallback)", "type": "local"}]
-
+                
                 # Only redraw if the list has changed
                 if str(fetched_cameras) != last_camera_list_str:
                     logger.info(f"Camera list updated: {fetched_cameras}")
@@ -78,7 +78,7 @@ class CameraService:
 
                     selection_image = cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
                     cv2.imshow(selection_window_name, selection_image)
-
+                
                 last_fetch_time = current_time
 
             key = cv2.waitKey(1) & 0xFF
@@ -107,12 +107,12 @@ class CameraService:
 
     async def detection_worker(self, ws):
         """Background task to handle sending frames and receiving detections."""
+        logger.info("Detection worker started.")
         while self.running:
             if self.latest_frame_to_send is not None:
                 frame = self.latest_frame_to_send
-                # self.latest_frame_to_send = None # Don't clear immediately, just overwrite later
-
-                # Resize frame to reduce bandwidth (e.g., max width 640)
+                
+                # Resize frame to reduce bandwidth
                 h, w = frame.shape[:2]
                 scale = 640 / w if w > 640 else 1.0
                 if scale < 1.0:
@@ -121,17 +121,25 @@ class CameraService:
                     small_frame = frame
 
                 _, buffer = cv2.imencode('.jpg', small_frame)
-
+                
                 try:
                     await ws.send(buffer.tobytes())
                     response = await ws.recv()
                     data = json.loads(response)
                     self.latest_detections = data.get('boxes', [])
+                except websockets.exceptions.ConnectionClosed:
+                    logger.warning("Detection worker: Connection was closed during operation.")
+                    break # Exit loop cleanly
+                except asyncio.CancelledError:
+                    logger.info("Detection worker: Task was cancelled.")
+                    break # Exit loop cleanly
                 except Exception as e:
-                    logger.error(f"Detection error: {e}")
-                    await asyncio.sleep(0.1) # Backoff slightly on error
+                    if self.running: # Only log error if we are not in the process of shutting down
+                        logger.error(f"An unexpected error occurred in detection worker: {e}")
+                    await asyncio.sleep(0.1) # Backoff slightly on other errors
             else:
                 await asyncio.sleep(0.01)
+        logger.info("Detection worker finished.")
 
     async def process_stream(self, source):
         video_capture = None
@@ -146,7 +154,7 @@ class CameraService:
         try:
             logger.info(f"Connecting to detection WebSocket: {self.detection_ws_url}")
             detection_ws = await websockets.connect(self.detection_ws_url)
-
+            
             # Start the background detection task
             detection_task = asyncio.create_task(self.detection_worker(detection_ws))
 
@@ -166,7 +174,7 @@ class CameraService:
 
             loop = asyncio.get_event_loop()
 
-            while True:
+            while self.running:
                 frame = None
                 if video_capture:
                     # Run blocking read in thread pool to avoid freezing async loop
@@ -174,6 +182,7 @@ class CameraService:
                     if not ret:
                         logger.warning("Failed to read frame from local camera.")
                         break
+                    # Flip the local webcam frame horizontally
                     frame = cv2.flip(frame, 1)
                 elif stream_ws:
                     try:
@@ -183,29 +192,30 @@ class CameraService:
                     except websockets.exceptions.ConnectionClosed:
                         logger.warning("Remote stream connection closed.")
                         break
-
+                
                 if frame is None: continue
 
                 # Update the frame available for the detection worker
                 self.latest_frame_to_send = frame.copy()
-
+                
                 # Draw the latest known detections on the current frame
                 self.display_frame(frame, self.latest_detections, window_name)
 
                 # Check if user closed the window or pressed 'q'
                 if cv2.waitKey(1) & 0xFF == ord('q') or cv2.getWindowProperty(window_name, cv2.WND_PROP_VISIBLE) < 1:
                     logger.info("User closed the stream window or pressed 'q'.")
+                    self.running = False # Signal all loops to stop
                     break
-
+                
                 # Small sleep to allow other tasks (like detection_worker) to run
                 await asyncio.sleep(0.001)
-
+        
         except websockets.exceptions.ConnectionClosed as e:
             logger.warning(f"WebSocket connection closed: {e}")
         except Exception as e:
             logger.error(f"An unexpected error occurred in process_stream: {e}", exc_info=True)
         finally:
-            self.running = False
+            self.running = False # Ensure running flag is false
             if detection_task:
                 detection_task.cancel()
                 try:
@@ -235,7 +245,7 @@ class CameraService:
             if det.get('mask_points'):
                 scaled_points = (np.array(det['mask_points']) * np.array([w, h])).astype(np.int32)
                 cv2.fillPoly(overlay, [scaled_points], color)
-
+            
             if all(k in det for k in ['xmin', 'ymin', 'xmax', 'ymax']):
                 x1, y1 = int(det['xmin'] * w), int(det['ymin'] * h)
                 x2, y2 = int(det['xmax'] * w), int(det['ymax'] * h)
@@ -251,7 +261,7 @@ class CameraService:
                 label = f"{det.get('name', '')}"
                 if det.get('distance_cm') is not None:
                     label += f" ({det['distance_cm']:.0f} cm)"
-
+                
                 bbox = draw.textbbox((0, 0), label, font=self.font)
                 text_height = bbox[3] - bbox[1]
                 text_y = y1 - 10 if y1 - 10 > text_height else y1 + text_height + 10

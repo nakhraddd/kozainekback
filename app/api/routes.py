@@ -67,6 +67,7 @@ class ConnectionManager:
         self.previous_tracked_objects = {}
         self.previous_static_objects = {}
         self.last_processed_frame = {}
+        self.last_detection_result = {} # Store last result to prevent flickering
 
     async def handle_ws(self, websocket: WebSocket):
         await websocket.accept()
@@ -76,11 +77,11 @@ class ConnectionManager:
         self.previous_tracked_objects[client_id] = set()
         self.previous_static_objects[client_id] = set()
         self.last_processed_frame[client_id] = None
+        self.last_detection_result[client_id] = {"text": "", "boxes": []} # Initialize
 
         logger.info(f"Client connected with ID: {client_id}")
         last_log_text = ""
-        empty_response = json.dumps({"text": "", "boxes": []})
-
+        
         new_frame_event = asyncio.Event()
         running = True
 
@@ -121,12 +122,8 @@ class ConnectionManager:
                     diff = cv2.absdiff(frame, last_frame)
                     change_percentage = np.count_nonzero(diff) / frame.size
                     if change_percentage < 0.1:
-                        # Send all boxes from the last good frame to prevent flickering
-                        if self.last_processed_frame.get(client_id) is not None:
-                            # This is tricky, we don't have the last result.
-                            # The best fix is to always send all boxes.
-                            # So we will just send an empty response for now.
-                            await websocket.send_text(empty_response)
+                        # If scene is static, send the last known result to prevent flickering
+                        await websocket.send_text(json.dumps(self.last_detection_result[client_id]))
                         continue
                     elif change_percentage > 0.8:
                         self.previous_tracked_objects[client_id].clear()
@@ -140,7 +137,6 @@ class ConnectionManager:
                     if not raw_detections:
                         self.previous_tracked_objects[client_id].clear()
                         self.previous_static_objects[client_id].clear()
-                        # Return empty list of boxes, but no text
                         return {"text": "", "boxes": []}
 
                     newly_spoken_objects = []
@@ -166,10 +162,8 @@ class ConnectionManager:
                     self.previous_static_objects[client_id] = current_static
                     self.last_processed_frame[client_id] = frame.copy()
 
-                    # Format message only for newly spoken objects
                     text_result = format_message(newly_spoken_objects)
 
-                    # Build response with ALL detected objects for drawing
                     response_boxes = []
                     for item in all_detected_objects:
                         proc_obj = item["processed"]
@@ -193,13 +187,14 @@ class ConnectionManager:
                 result = await run_in_threadpool(process_frame_logic)
 
                 if result:
+                    self.last_detection_result[client_id] = result # Cache the latest result
                     if result["text"] != last_log_text and result["text"] != "":
                         logger.info(f"Detection for {client_id[:8]}: {result['text']}")
                         last_log_text = result["text"]
                     await websocket.send_text(json.dumps(result))
                 else:
-                    # This case might not be hit anymore, but as a fallback
-                    await websocket.send_text(empty_response)
+                    # Fallback to sending the last known result
+                    await websocket.send_text(json.dumps(self.last_detection_result[client_id]))
 
         except Exception as e:
             logger.error(f"Error in processor loop for {client_id}: {e}", exc_info=True)
@@ -216,4 +211,5 @@ class ConnectionManager:
             if client_id in self.previous_tracked_objects: del self.previous_tracked_objects[client_id]
             if client_id in self.previous_static_objects: del self.previous_static_objects[client_id]
             if client_id in self.last_processed_frame: del self.last_processed_frame[client_id]
+            if client_id in self.last_detection_result: del self.last_detection_result[client_id]
             logger.info(f"Client {client_id} disconnected and cleaned up.")

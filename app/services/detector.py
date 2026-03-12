@@ -1,14 +1,19 @@
 import cv2
+import logging
 from typing import Protocol, List
 import numpy as np
+import torch
 from ultralytics import YOLO
 from app.domain.models import DetectionResult
+
+logger = logging.getLogger(__name__)
+
 
 class ObjectDetector(Protocol):
     def detect(self, frame: np.ndarray) -> List[DetectionResult]:
         pass
 
-# Define known real-world widths for common objects in centimeters.
+
 KNOWN_OBJECT_WIDTHS = {
     "person": 50.0, "bicycle": 170.0, "car": 180.0, "motorcycle": 80.0,
     "airplane": 5000.0, "bus": 250.0, "train": 280.0, "truck": 250.0,
@@ -32,7 +37,6 @@ KNOWN_OBJECT_WIDTHS = {
     "toothbrush": 2.0, "A4 paper": 21.0, "stairs": 100.0
 }
 
-# English to Russian translation dictionary
 RUSSIAN_NAMES = {
     "person": "человек", "bicycle": "велосипед", "car": "машина", "motorcycle": "мотоцикл",
     "airplane": "самолет", "bus": "автобус", "train": "поезд", "truck": "грузовик",
@@ -59,29 +63,32 @@ RUSSIAN_NAMES = {
     "Caution! Possible obstacle ahead": "Внимание! Возможное припятсвие впереди"
 }
 
+
 class YoloDetector:
     def __init__(
-        self,
-        model_path: str = "yolov8n-seg.pt",
-        conf_threshold: float = 0.5,
-        focal_length: float = 1680,
+            self,
+            model_path: str = "yolov8n-seg.pt",
+            conf_threshold: float = 0.5,
+            focal_length: float = 1680,
     ):
+        self.device = 'cuda:0' if torch.cuda.is_available() else 'cpu'
+        logger.info(f"Initializing YOLO model on device: {self.device}")
+
         self.model = YOLO(model_path)
         self.conf_threshold = conf_threshold
         self.focal_length = focal_length
 
     def detect(self, frame: np.ndarray) -> List[DetectionResult]:
-        # --- Canny + Hough Transform for obstacle detection ---
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         edges = cv2.Canny(gray, 50, 150, apertureSize=3)
-        
+
         h, w = frame.shape[:2]
         roi_w_start = w // 3
         roi_w_end = 2 * w // 3
         roi = edges[:, roi_w_start:roi_w_end]
-        
-        lines = cv2.HoughLinesP(roi, 1, np.pi / 180, threshold=100, minLineLength=h*0.3, maxLineGap=20)
-        
+
+        lines = cv2.HoughLinesP(roi, 1, np.pi / 180, threshold=100, minLineLength=h * 0.3, maxLineGap=20)
+
         vertical_lines = []
         if lines is not None:
             for line in lines:
@@ -103,15 +110,14 @@ class YoloDetector:
                 )
             )
 
-        # --- Stairs detection ---
-        lines = cv2.HoughLinesP(edges, 1, np.pi / 180, threshold=80, minLineLength=w*0.4, maxLineGap=20)
+        lines = cv2.HoughLinesP(edges, 1, np.pi / 180, threshold=80, minLineLength=w * 0.4, maxLineGap=20)
         horizontal_lines = []
         if lines is not None:
             for line in lines:
                 x1, y1, x2, y2 = line[0]
                 if abs(y1 - y2) < 10:
                     horizontal_lines.append(line)
-        
+
         if len(horizontal_lines) > 4:
             stairs_box = (0.0, 0.0, float(w), float(h))
             obstacle_detections.append(
@@ -125,36 +131,36 @@ class YoloDetector:
                 )
             )
 
-        # --- YOLO object detection ---
         results = self.model.track(
-            frame, 
+            frame,
             persist=True,
             verbose=False,
             rect=True,
             imgsz=640,
             conf=self.conf_threshold,
-            iou=0.7
+            iou=0.7,
+            device=self.device
         )
         yolo_detections = []
-        
+
         for r in results:
             img_height, img_width = r.orig_shape
-            
+
             if r.boxes.id is None:
                 continue
 
             for i, box in enumerate(r.boxes):
                 track_id = int(box.id[0])
                 conf = float(box.conf[0])
-                
+
                 cls_id = int(box.cls[0])
                 english_name = self.model.names[cls_id]
-                
+
                 name = RUSSIAN_NAMES.get(english_name, english_name)
-                
+
                 x1, y1, x2, y2 = box.xyxy[0]
                 coords = (float(x1), float(y1), float(x2), float(y2))
-                
+
                 distance = None
                 known_width = KNOWN_OBJECT_WIDTHS.get(english_name)
                 if known_width is not None:
@@ -170,7 +176,7 @@ class YoloDetector:
                         if polygon.size > 0:
                             normalized_polygon = polygon / np.array([img_width, img_height])
                             mask_points = normalized_polygon.tolist()
-                
+
                 yolo_detections.append(
                     DetectionResult(
                         name=name,
@@ -181,5 +187,5 @@ class YoloDetector:
                         track_id=track_id
                     )
                 )
-                    
+
         return obstacle_detections + yolo_detections
