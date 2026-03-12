@@ -42,7 +42,7 @@ class CameraService:
 
         while True:
             current_time = asyncio.get_event_loop().time()
-            
+
             # Refresh list every 2 seconds
             if current_time - last_fetch_time > 2.0:
                 try:
@@ -55,7 +55,7 @@ class CameraService:
 
                 if not fetched_cameras:
                     fetched_cameras = [{"id": "local_0", "name": "Local Webcam (Fallback)", "type": "local"}]
-                
+
                 # Only redraw if the list has changed
                 if str(fetched_cameras) != last_camera_list_str:
                     logger.info(f"Camera list updated: {fetched_cameras}")
@@ -78,7 +78,7 @@ class CameraService:
 
                     selection_image = cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
                     cv2.imshow(selection_window_name, selection_image)
-                
+
                 last_fetch_time = current_time
 
             key = cv2.waitKey(1) & 0xFF
@@ -111,7 +111,7 @@ class CameraService:
             if self.latest_frame_to_send is not None:
                 frame = self.latest_frame_to_send
                 # self.latest_frame_to_send = None # Don't clear immediately, just overwrite later
-                
+
                 # Resize frame to reduce bandwidth (e.g., max width 640)
                 h, w = frame.shape[:2]
                 scale = 640 / w if w > 640 else 1.0
@@ -121,7 +121,7 @@ class CameraService:
                     small_frame = frame
 
                 _, buffer = cv2.imencode('.jpg', small_frame)
-                
+
                 try:
                     await ws.send(buffer.tobytes())
                     response = await ws.recv()
@@ -146,7 +146,7 @@ class CameraService:
         try:
             logger.info(f"Connecting to detection WebSocket: {self.detection_ws_url}")
             detection_ws = await websockets.connect(self.detection_ws_url)
-            
+
             # Start the background detection task
             detection_task = asyncio.create_task(self.detection_worker(detection_ws))
 
@@ -174,6 +174,7 @@ class CameraService:
                     if not ret:
                         logger.warning("Failed to read frame from local camera.")
                         break
+                    frame = cv2.flip(frame, 1)
                 elif stream_ws:
                     try:
                         data = await stream_ws.recv()
@@ -182,12 +183,12 @@ class CameraService:
                     except websockets.exceptions.ConnectionClosed:
                         logger.warning("Remote stream connection closed.")
                         break
-                
+
                 if frame is None: continue
 
                 # Update the frame available for the detection worker
                 self.latest_frame_to_send = frame.copy()
-                
+
                 # Draw the latest known detections on the current frame
                 self.display_frame(frame, self.latest_detections, window_name)
 
@@ -195,10 +196,10 @@ class CameraService:
                 if cv2.waitKey(1) & 0xFF == ord('q') or cv2.getWindowProperty(window_name, cv2.WND_PROP_VISIBLE) < 1:
                     logger.info("User closed the stream window or pressed 'q'.")
                     break
-                
+
                 # Small sleep to allow other tasks (like detection_worker) to run
                 await asyncio.sleep(0.001)
-        
+
         except websockets.exceptions.ConnectionClosed as e:
             logger.warning(f"WebSocket connection closed: {e}")
         except Exception as e:
@@ -234,7 +235,7 @@ class CameraService:
             if det.get('mask_points'):
                 scaled_points = (np.array(det['mask_points']) * np.array([w, h])).astype(np.int32)
                 cv2.fillPoly(overlay, [scaled_points], color)
-            
+
             if all(k in det for k in ['xmin', 'ymin', 'xmax', 'ymax']):
                 x1, y1 = int(det['xmin'] * w), int(det['ymin'] * h)
                 x2, y2 = int(det['xmax'] * w), int(det['ymax'] * h)
@@ -250,11 +251,11 @@ class CameraService:
                 label = f"{det.get('name', '')}"
                 if det.get('distance_cm') is not None:
                     label += f" ({det['distance_cm']:.0f} cm)"
-                
+
                 bbox = draw.textbbox((0, 0), label, font=self.font)
                 text_height = bbox[3] - bbox[1]
                 text_y = y1 - 10 if y1 - 10 > text_height else y1 + text_height + 10
-                
+
                 color_bgr = self.get_color_for_object(det.get('name', ''))
                 draw.rectangle((x1, text_y - text_height - 5, x1 + bbox[2] - bbox[0] + 10, text_y + 5), fill=(color_bgr[2], color_bgr[1], color_bgr[0]))
                 draw.text((x1 + 5, text_y - text_height - 5), label, font=self.font, fill=(255, 255, 255))

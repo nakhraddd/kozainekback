@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 
 app = FastAPI(title="KOZAINEK API")
 
-detector = YoloDetector(model_path="yolov8s-seg.pt")
+detector = YoloDetector(model_path="yolov8n-seg.pt")
 manager = ConnectionManager(detector=detector)
 
 camera_service = CameraService()

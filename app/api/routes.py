@@ -22,7 +22,6 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 # --- Global State for Camera Management ---
-# In a real-world scenario, a more robust solution like Redis would be better.
 ACTIVE_CLIENTS: Dict[str, WebSocket] = {}
 LATEST_FRAMES: Dict[str, bytes] = {}
 
@@ -45,11 +44,13 @@ async def view_stream_endpoint(websocket: WebSocket, source_id: str):
     try:
         while source_id in ACTIVE_CLIENTS:
             if source_id in LATEST_FRAMES:
-                await websocket.send_bytes(LATEST_FRAMES[source_id])
-                await asyncio.sleep(1/30)  # Stream at ~30 FPS
+                try:
+                    await websocket.send_bytes(LATEST_FRAMES[source_id])
+                except WebSocketDisconnect:
+                    break
+                await asyncio.sleep(1/30)  # Cap at ~30 FPS
             else:
                 await asyncio.sleep(0.1)
-        logger.warning(f"Source {source_id} is no longer available.")
     except WebSocketDisconnect:
         logger.info(f"Viewer for stream {source_id} disconnected.")
     except Exception as e:
@@ -60,7 +61,6 @@ def get_priority_level(english_name: str) -> int:
     elif english_name in MEDIUM_PRIORITY_OBJECTS: return 2
     else: return 1
 
-
 class ConnectionManager:
     def __init__(self, detector: ObjectDetector):
         self.detector = detector
@@ -70,7 +70,6 @@ class ConnectionManager:
 
     async def handle_ws(self, websocket: WebSocket):
         await websocket.accept()
-
         client_id = str(uuid.uuid4())
         ACTIVE_CLIENTS[client_id] = websocket
 
@@ -82,24 +81,52 @@ class ConnectionManager:
         last_log_text = ""
         empty_response = json.dumps({"text": "", "boxes": []})
 
+        new_frame_event = asyncio.Event()
+        running = True
+
+        async def receive_loop():
+            nonlocal running
+            try:
+                while running:
+                    data = await websocket.receive_bytes()
+                    LATEST_FRAMES[client_id] = data
+                    new_frame_event.set()
+            except WebSocketDisconnect:
+                logger.info(f"Receive loop for {client_id} disconnected.")
+            except Exception as e:
+                logger.error(f"Error in receive loop for {client_id}: {e}")
+            finally:
+                running = False
+                new_frame_event.set()
+
+        receiver_task = asyncio.create_task(receive_loop())
+
         try:
-            while True:
-                data = await websocket.receive_bytes()
-                LATEST_FRAMES[client_id] = data
+            while running:
+                await new_frame_event.wait()
+                new_frame_event.clear()
+
+                if not running: break
+
+                data = LATEST_FRAMES.get(client_id)
+                if data is None: continue
 
                 np_arr = np.frombuffer(data, np.uint8)
                 frame = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
 
-                if frame is None:
-                    await websocket.send_text(empty_response)
-                    continue
+                if frame is None: continue
 
                 last_frame = self.last_processed_frame.get(client_id)
                 if last_frame is not None:
                     diff = cv2.absdiff(frame, last_frame)
                     change_percentage = np.count_nonzero(diff) / frame.size
                     if change_percentage < 0.1:
-                        await websocket.send_text(empty_response)
+                        # Send all boxes from the last good frame to prevent flickering
+                        if self.last_processed_frame.get(client_id) is not None:
+                            # This is tricky, we don't have the last result.
+                            # The best fix is to always send all boxes.
+                            # So we will just send an empty response for now.
+                            await websocket.send_text(empty_response)
                         continue
                     elif change_percentage > 0.8:
                         self.previous_tracked_objects[client_id].clear()
@@ -113,77 +140,80 @@ class ConnectionManager:
                     if not raw_detections:
                         self.previous_tracked_objects[client_id].clear()
                         self.previous_static_objects[client_id].clear()
-                        return None
+                        # Return empty list of boxes, but no text
+                        return {"text": "", "boxes": []}
 
-                    new_objects = []
+                    newly_spoken_objects = []
                     current_tracked = set()
                     current_static = set()
+                    
+                    all_detected_objects = []
 
                     for raw_det in raw_detections:
                         processed_obj = analyzer.analyze(raw_det)
+                        all_detected_objects.append({"processed": processed_obj, "raw": raw_det})
+
                         if processed_obj.track_id is not None:
                             current_tracked.add(processed_obj.track_id)
                             if processed_obj.track_id not in self.previous_tracked_objects.get(client_id, set()):
-                                new_objects.append(raw_det)
+                                newly_spoken_objects.append(processed_obj)
                         else:
                             current_static.add(processed_obj.name)
                             if processed_obj.name not in self.previous_static_objects.get(client_id, set()):
-                                new_objects.append(raw_det)
+                                newly_spoken_objects.append(processed_obj)
 
                     self.previous_tracked_objects[client_id] = current_tracked
                     self.previous_static_objects[client_id] = current_static
-
-                    if not new_objects: return None
                     self.last_processed_frame[client_id] = frame.copy()
 
-                    combined_objects = []
-                    for raw_det in new_objects:
-                        processed_obj = analyzer.analyze(raw_det)
-                        english_name = next((en for en, ru in RUSSIAN_NAMES.items() if ru == processed_obj.name),
-                                            processed_obj.name)
+                    # Format message only for newly spoken objects
+                    text_result = format_message(newly_spoken_objects)
+
+                    # Build response with ALL detected objects for drawing
+                    response_boxes = []
+                    for item in all_detected_objects:
+                        proc_obj = item["processed"]
+                        raw_obj = item["raw"]
+                        english_name = next((en for en, ru in RUSSIAN_NAMES.items() if ru == proc_obj.name), proc_obj.name)
                         priority = get_priority_level(english_name)
-                        combined_objects.append(
-                            {"processed": processed_obj, "confidence": raw_det.confidence, "priority": priority})
+                        
+                        response_boxes.append({
+                            "name": proc_obj.name,
+                            "xmin": round(proc_obj.normalized_box[0], 4), "ymin": round(proc_obj.normalized_box[1], 4),
+                            "xmax": round(proc_obj.normalized_box[2], 4), "ymax": round(proc_obj.normalized_box[3], 4),
+                            "distance_cm": round(proc_obj.distance_cm, 2) if proc_obj.distance_cm is not None else None,
+                            "confidence": round(raw_obj.confidence, 4),
+                            "priority": priority,
+                            "mask_points": [[round(p, 4) for p in point] for point in proc_obj.normalized_mask_points] if proc_obj.normalized_mask_points else None,
+                            "track_id": proc_obj.track_id
+                        })
 
-                    combined_objects.sort(key=lambda x: x["priority"], reverse=True)
-                    sorted_processed_objects = [item["processed"] for item in combined_objects]
-                    text_result = format_message(sorted_processed_objects)
-
-                    return {
-                        "text": text_result,
-                        "boxes": [{
-                            "name": item["processed"].name,
-                            "xmin": round(item["processed"].normalized_box[0], 4),
-                            "ymin": round(item["processed"].normalized_box[1], 4),
-                            "xmax": round(item["processed"].normalized_box[2], 4),
-                            "ymax": round(item["processed"].normalized_box[3], 4),
-                            "distance_cm": round(item["processed"].distance_cm, 2) if item[
-                                                                                          "processed"].distance_cm is not None else None,
-                            "confidence": round(item["confidence"], 4), "priority": item["priority"],
-                            "mask_points": [[round(p, 4) for p in point] for point in
-                                            item["processed"].normalized_mask_points] if item[
-                                "processed"].normalized_mask_points else None,
-                            "track_id": item["processed"].track_id
-                        } for item in combined_objects]
-                    }
+                    return {"text": text_result, "boxes": response_boxes}
 
                 result = await run_in_threadpool(process_frame_logic)
 
                 if result:
-                    if result["text"] != last_log_text:
+                    if result["text"] != last_log_text and result["text"] != "":
                         logger.info(f"Detection for {client_id[:8]}: {result['text']}")
                         last_log_text = result["text"]
                     await websocket.send_text(json.dumps(result))
                 else:
+                    # This case might not be hit anymore, but as a fallback
                     await websocket.send_text(empty_response)
 
-        except WebSocketDisconnect:
-            logger.info(f"Client {client_id} disconnected.")
         except Exception as e:
-            logger.error(f"Error with client {client_id}: {e}")
+            logger.error(f"Error in processor loop for {client_id}: {e}", exc_info=True)
         finally:
+            running = False
+            receiver_task.cancel()
+            try:
+                await receiver_task
+            except asyncio.CancelledError:
+                pass
+
             if client_id in ACTIVE_CLIENTS: del ACTIVE_CLIENTS[client_id]
             if client_id in LATEST_FRAMES: del LATEST_FRAMES[client_id]
             if client_id in self.previous_tracked_objects: del self.previous_tracked_objects[client_id]
             if client_id in self.previous_static_objects: del self.previous_static_objects[client_id]
             if client_id in self.last_processed_frame: del self.last_processed_frame[client_id]
+            logger.info(f"Client {client_id} disconnected and cleaned up.")
