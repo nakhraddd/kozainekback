@@ -6,21 +6,30 @@ import numpy as np
 import colorsys
 from PIL import Image, ImageDraw, ImageFont
 import httpx
+import logging
+from concurrent.futures import ThreadPoolExecutor
 
 from app.domain.priorities import HIGH_PRIORITY_OBJECTS, MEDIUM_PRIORITY_OBJECTS
 from app.services.detector import RUSSIAN_NAMES
+
+# Configure logging for this service
+logger = logging.getLogger(__name__)
 
 class CameraService:
     def __init__(self, detection_websocket_url="ws://localhost:8000/ws", server_http_url="http://localhost:8000"):
         self.detection_ws_url = detection_websocket_url
         self.server_http_url = server_http_url
         self.font = self._load_font()
+        self.latest_detections = []
+        self.latest_frame_to_send = None
+        self.running = False
+        self.executor = ThreadPoolExecutor(max_workers=1)
 
     def _load_font(self):
         try:
             return ImageFont.truetype("arial.ttf", 20)
         except IOError:
-            print("Warning: arial.ttf not found, using default font.")
+            logger.warning("arial.ttf not found, using default font. Russian characters might not display correctly.")
             return ImageFont.load_default()
 
     async def select_camera_source(self):
@@ -29,39 +38,47 @@ class CameraService:
 
         last_fetch_time = 0
         available_cameras = []
+        last_camera_list_str = ""
 
         while True:
             current_time = asyncio.get_event_loop().time()
-
-            if current_time - last_fetch_time > 1.0:
+            
+            # Refresh list every 2 seconds
+            if current_time - last_fetch_time > 2.0:
                 try:
                     async with httpx.AsyncClient() as client:
                         response = await client.get(f"{self.server_http_url}/cameras")
                         response.raise_for_status()
-                        available_cameras = response.json()
+                        fetched_cameras = response.json()
                 except (httpx.RequestError, json.JSONDecodeError):
-                    available_cameras = [{"id": "local_0", "name": "Local Webcam (Fallback)", "type": "local"}]
+                    fetched_cameras = [{"id": "local_0", "name": "Local Webcam (Fallback)", "type": "local"}]
 
-                if not available_cameras:
-                    available_cameras = [{"id": "local_0", "name": "Local Webcam (Fallback)", "type": "local"}]
+                if not fetched_cameras:
+                    fetched_cameras = [{"id": "local_0", "name": "Local Webcam (Fallback)", "type": "local"}]
+                
+                # Only redraw if the list has changed
+                if str(fetched_cameras) != last_camera_list_str:
+                    logger.info(f"Camera list updated: {fetched_cameras}")
+                    available_cameras = fetched_cameras
+                    last_camera_list_str = str(available_cameras)
 
-                display_height = max(200, len(available_cameras) * 30 + 80)
-                selection_image = np.zeros((display_height, 600, 3), dtype=np.uint8)
-                selection_image.fill(40)
+                    display_height = max(200, len(available_cameras) * 30 + 80)
+                    selection_image = np.zeros((display_height, 600, 3), dtype=np.uint8)
+                    selection_image.fill(40)
 
-                pil_img = Image.fromarray(cv2.cvtColor(selection_image, cv2.COLOR_BGR2RGB))
-                draw = ImageDraw.Draw(pil_img)
+                    pil_img = Image.fromarray(cv2.cvtColor(selection_image, cv2.COLOR_BGR2RGB))
+                    draw = ImageDraw.Draw(pil_img)
 
-                draw.text((20, 20), "Select a Camera Source (Auto-refreshing):", font=self.font, fill=(255, 255, 255))
-                y_offset = 60
-                for i, cam in enumerate(available_cameras):
-                    draw.text((40, y_offset), f"{i + 1}. {cam['name']}", font=self.font, fill=(200, 200, 200))
-                    y_offset += 30
-                draw.text((40, y_offset + 10), "Q. Quit", font=self.font, fill=(255, 100, 100))
+                    draw.text((20, 20), "Select a Camera Source (Auto-refreshing):", font=self.font, fill=(255, 255, 255))
+                    y_offset = 60
+                    for i, cam in enumerate(available_cameras):
+                        draw.text((40, y_offset), f"{i + 1}. {cam['name']}", font=self.font, fill=(200, 200, 200))
+                        y_offset += 30
+                    draw.text((40, y_offset + 10), "Q. Quit", font=self.font, fill=(255, 100, 100))
 
-                selection_image = cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
-                cv2.imshow(selection_window_name, selection_image)
-
+                    selection_image = cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
+                    cv2.imshow(selection_window_name, selection_image)
+                
                 last_fetch_time = current_time
 
             key = cv2.waitKey(1) & 0xFF
@@ -82,64 +99,120 @@ class CameraService:
         while True:
             selected_source = await self.select_camera_source()
             if selected_source is None:
-                print("Exiting camera service.")
+                logger.info("Exiting camera service.")
                 break
 
             await self.process_stream(selected_source)
-            print("Stream ended. Returning to selection screen.")
+            logger.info("Stream ended. Returning to selection screen.")
+
+    async def detection_worker(self, ws):
+        """Background task to handle sending frames and receiving detections."""
+        while self.running:
+            if self.latest_frame_to_send is not None:
+                frame = self.latest_frame_to_send
+                # self.latest_frame_to_send = None # Don't clear immediately, just overwrite later
+                
+                # Resize frame to reduce bandwidth (e.g., max width 640)
+                h, w = frame.shape[:2]
+                scale = 640 / w if w > 640 else 1.0
+                if scale < 1.0:
+                    small_frame = cv2.resize(frame, (int(w * scale), int(h * scale)))
+                else:
+                    small_frame = frame
+
+                _, buffer = cv2.imencode('.jpg', small_frame)
+                
+                try:
+                    await ws.send(buffer.tobytes())
+                    response = await ws.recv()
+                    data = json.loads(response)
+                    self.latest_detections = data.get('boxes', [])
+                except Exception as e:
+                    logger.error(f"Detection error: {e}")
+                    await asyncio.sleep(0.1) # Backoff slightly on error
+            else:
+                await asyncio.sleep(0.01)
 
     async def process_stream(self, source):
         video_capture = None
         stream_ws = None
         detection_ws = None
+        window_name = "Object Detection"
+        self.running = True
+        self.latest_detections = []
+        self.latest_frame_to_send = None
+        detection_task = None
 
         try:
-            # Connect to the detection websocket first
+            logger.info(f"Connecting to detection WebSocket: {self.detection_ws_url}")
             detection_ws = await websockets.connect(self.detection_ws_url)
-            print(f"Connected to detection WebSocket: {self.detection_ws_url}")
+            
+            # Start the background detection task
+            detection_task = asyncio.create_task(self.detection_worker(detection_ws))
 
-            # Connect to the frame source (local or remote)
             if source['type'] == 'local':
                 video_capture = cv2.VideoCapture(0)
                 if not video_capture.isOpened():
-                    print("Error: Could not open local video stream.")
+                    logger.error("Could not open local video stream.")
                     return
+                logger.info("Local webcam opened.")
             elif source['type'] == 'remote_websocket':
                 stream_ws_url = source.get('stream_ws_url')
                 if not stream_ws_url:
-                    print("Error: Remote source has no 'stream_ws_url'.")
+                    logger.error("Remote source has no 'stream_ws_url'.")
                     return
+                logger.info(f"Connecting to remote stream: {stream_ws_url}")
                 stream_ws = await websockets.connect(stream_ws_url)
-                print(f"Connected to remote stream: {stream_ws_url}")
+
+            loop = asyncio.get_event_loop()
 
             while True:
                 frame = None
                 if video_capture:
-                    ret, frame = video_capture.read()
-                    if not ret: break
+                    # Run blocking read in thread pool to avoid freezing async loop
+                    ret, frame = await loop.run_in_executor(self.executor, video_capture.read)
+                    if not ret:
+                        logger.warning("Failed to read frame from local camera.")
+                        break
                 elif stream_ws:
-                    data = await stream_ws.recv()
-                    np_arr = np.frombuffer(data, np.uint8)
-                    frame = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
+                    try:
+                        data = await stream_ws.recv()
+                        np_arr = np.frombuffer(data, np.uint8)
+                        frame = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
+                    except websockets.exceptions.ConnectionClosed:
+                        logger.warning("Remote stream connection closed.")
+                        break
                 
                 if frame is None: continue
 
-                _, buffer = cv2.imencode('.jpg', frame)
-                await detection_ws.send(buffer.tobytes())
+                # Update the frame available for the detection worker
+                self.latest_frame_to_send = frame.copy()
                 
-                response = await detection_ws.recv()
-                detections = json.loads(response).get('boxes', [])
-                
-                self.display_frame(frame, detections)
+                # Draw the latest known detections on the current frame
+                self.display_frame(frame, self.latest_detections, window_name)
 
-                if cv2.waitKey(1) & 0xFF == ord('q'):
+                # Check if user closed the window or pressed 'q'
+                if cv2.waitKey(1) & 0xFF == ord('q') or cv2.getWindowProperty(window_name, cv2.WND_PROP_VISIBLE) < 1:
+                    logger.info("User closed the stream window or pressed 'q'.")
                     break
+                
+                # Small sleep to allow other tasks (like detection_worker) to run
+                await asyncio.sleep(0.001)
         
-        except (websockets.exceptions.ConnectionClosed, httpx.RequestError) as e:
-            print(f"Connection error: {e}")
+        except websockets.exceptions.ConnectionClosed as e:
+            logger.warning(f"WebSocket connection closed: {e}")
         except Exception as e:
-            print(f"An unexpected error occurred: {e}")
+            logger.error(f"An unexpected error occurred in process_stream: {e}", exc_info=True)
         finally:
+            self.running = False
+            if detection_task:
+                detection_task.cancel()
+                try:
+                    await detection_task
+                except asyncio.CancelledError:
+                    pass
+
+            logger.info("Cleaning up stream resources...")
             if video_capture: video_capture.release()
             if stream_ws: await stream_ws.close()
             if detection_ws: await detection_ws.close()
@@ -151,7 +224,7 @@ class CameraService:
         elif english_name in MEDIUM_PRIORITY_OBJECTS: return (0, 255, 255)
         else: return (0, 255, 0)
 
-    def display_frame(self, frame, detections):
+    def display_frame(self, frame, detections, window_name):
         h, w, _ = frame.shape
         overlay = frame.copy()
         alpha = 0.3
@@ -186,11 +259,12 @@ class CameraService:
                 draw.rectangle((x1, text_y - text_height - 5, x1 + bbox[2] - bbox[0] + 10, text_y + 5), fill=(color_bgr[2], color_bgr[1], color_bgr[0]))
                 draw.text((x1 + 5, text_y - text_height - 5), label, font=self.font, fill=(255, 255, 255))
 
-        cv2.imshow('Object Detection', cv2.cvtColor(np.array(pil_image), cv2.COLOR_RGB2BGR))
+        cv2.imshow(window_name, cv2.cvtColor(np.array(pil_image), cv2.COLOR_RGB2BGR))
 
 async def main():
     camera_service = CameraService()
     await camera_service.run_camera_loop()
 
 if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO)
     asyncio.run(main())
