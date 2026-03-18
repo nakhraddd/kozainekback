@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - main # Trigger on every push to the main branch
+  workflow_dispatch: # Allow manual trigger from GitHub Actions tab
 
 permissions:
   contents: write
@@ -27,12 +28,12 @@ jobs:
         pip install -r requirements.txt
         pip install pyinstaller
 
-    - name: Check for Custom Model & Prepare Font
+    - name: Prepare Assets (Model & Font)
       run: |
-        # Check if the custom model exists in the repo
+        # Download standard YOLOv8n-seg model if it doesn't exist
         if (-Not (Test-Path "yolov8n-seg.pt")) {
-            Write-Error "Error: 'yolov8n-seg.pt' was not found. This appears to be a custom model. You MUST add and push this file to your GitHub repository for the build to succeed."
-            exit 1
+            Write-Host "Downloading standard YOLOv8n-seg model..."
+            Invoke-WebRequest -Uri "https://github.com/ultralytics/assets/releases/download/v8.2.0/yolov8n-seg.pt" -OutFile "yolov8n-seg.pt"
         }
         
         # Ensure Arial font exists (copy from System if not in repo)
