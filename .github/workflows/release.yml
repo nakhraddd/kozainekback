@@ -1,9 +1,9 @@
-name: Build and Release Kozainek
+name: Build and Release Kozainek (Latest)
 
 on:
   push:
-    tags:
-      - 'v*' # Trigger on tags like v1.0.0
+    branches:
+      - main # Trigger on every push to the main branch
 
 permissions:
   contents: write
@@ -29,7 +29,7 @@ jobs:
 
     - name: Prepare Assets (Model & Font)
       run: |
-        # Download YOLOv8n-seg model if it doesn't exist (because it wasn't pushed to git)
+        # Download YOLO26n-seg model if it doesn't exist
         if (-Not (Test-Path "yolov8n-seg.pt")) {
             Write-Host "Downloading YOLO model..."
             Invoke-WebRequest -Uri "https://github.com/ultralytics/assets/releases/download/v8.2.0/yolov26n-seg.pt" -OutFile "yolov26n-seg.pt"
@@ -49,9 +49,15 @@ jobs:
       run: |
         Compress-Archive -Path dist/Kozainek -DestinationPath Kozainek-Windows.zip
 
-    - name: Create Release
+    - name: Update Latest Release
       uses: ncipollo/release-action@v1
       with:
         artifacts: "Kozainek-Windows.zip"
         token: ${{ secrets.GITHUB_TOKEN }}
-        generateReleaseNotes: true
+        tag: "latest"
+        name: "Latest Build"
+        body: "Automated build from commit ${{ github.sha }}"
+        allowUpdates: true
+        removeArtifacts: true
+        replacesArtifacts: true
+        makeLatest: true
