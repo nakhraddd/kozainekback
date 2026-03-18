@@ -8,7 +8,7 @@ class AppSettings:
     CAMERA_FPS = 30 # Target FPS for local camera capture
 
     # Detector Parameters
-    DETECTOR_MODEL_PATH = "yolov26n-seg.pt" # YOLO model path
+    DETECTOR_MODEL_PATH = "yolov8n-seg.pt" # YOLO model path
     DETECTOR_CONF_THRESHOLD = 0.5 # Confidence threshold for detections
     DETECTOR_FOCAL_LENGTH = 1680.0 # Focal length for distance estimation
     DETECTOR_IMG_SIZE = 640 # Image size for YOLO inference

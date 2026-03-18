@@ -38,7 +38,7 @@ jobs:
 
     - name: Build with PyInstaller
       run: |
-        pyinstaller --name Kozainek --onedir --add-data "app;app" --add-data "arial.ttf;." --hidden-import "cv2" --hidden-import "torch" --hidden-import "ultralytics" --hidden-import "PIL" --hidden-import "numpy" --hidden-import "scipy" --hidden-import "websockets" --hidden-import "fastapi" --hidden-import "uvicorn" --hidden-import "starlette" --hidden-import "pydantic" --hidden-import "httpx" --hidden-import "polars" --hidden-import "yaml" --hidden-import "pyngrok" app/main.py -y
+        pyinstaller --name Kozainek --onedir --add-data "app;app" --add-data "arial.ttf;." --hidden-import "cv2" --hidden-import "torch" --hidden-import "ultralytics" --hidden-import "PIL" --hidden-import "numpy" --hidden-import "scipy" --hidden-import "websockets" --hidden-import "fastapi" --hidden-import "uvicorn" --hidden-import "starlette" --hidden-import "pydantic" --hidden-import "httpx" --hidden-import "polars" --hidden-import "yaml" --hidden-import "pyngrok" --hidden-import "lap" --hidden-import "lapx" app/main.py -y
 
     - name: Zip the build
       run: |

@@ -13,3 +13,4 @@ torch
 torchvision
 torchaudio
 pyinstaller
+lapx>=0.5.5
