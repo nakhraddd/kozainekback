@@ -784,3 +784,6 @@ app/__pycache__/main.cpython-313.pyc
 /venv11/Scripts/python.exe
 /venv11/Scripts/pythonw.exe
 /venv11/pyvenv.cfg
+/dist/
+/build/
+/venv11/

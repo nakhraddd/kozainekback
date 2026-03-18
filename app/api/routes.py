@@ -4,13 +4,16 @@ import logging
 import json
 import uuid
 import asyncio
+import os
+import sys
 from typing import Dict
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
-from app.services.detector import ObjectDetector
+from app.services.detector import ObjectDetector, YoloDetector
 from app.domain.logic import SpatialAnalyzer
 from starlette.concurrency import run_in_threadpool
 from app.domain.priorities import HIGH_PRIORITY_OBJECTS, MEDIUM_PRIORITY_OBJECTS
 from app.domain.message_formatter import format_message, RUSSIAN_NAMES
+from app.services.voice_output import VoiceAssistant
 
 logging.basicConfig(
     level=logging.INFO,
@@ -48,7 +51,6 @@ async def view_stream_endpoint(websocket: WebSocket, source_id: str):
                     await websocket.send_bytes(LATEST_FRAMES[source_id])
                 except WebSocketDisconnect:
                     break
-                await asyncio.sleep(1/30)  # Cap at ~30 FPS
             else:
                 await asyncio.sleep(0.1)
     except WebSocketDisconnect:
@@ -64,10 +66,11 @@ def get_priority_level(english_name: str) -> int:
 class ConnectionManager:
     def __init__(self, detector: ObjectDetector):
         self.detector = detector
+        self.voice_assistant = VoiceAssistant()
         self.previous_tracked_objects = {}
         self.previous_static_objects = {}
         self.last_processed_frame = {}
-        self.last_detection_result = {} # Store last result to prevent flickering
+        self.last_detection_result = {}
 
     async def handle_ws(self, websocket: WebSocket):
         await websocket.accept()
@@ -77,7 +80,7 @@ class ConnectionManager:
         self.previous_tracked_objects[client_id] = set()
         self.previous_static_objects[client_id] = set()
         self.last_processed_frame[client_id] = None
-        self.last_detection_result[client_id] = {"text": "", "boxes": []} # Initialize
+        self.last_detection_result[client_id] = {"text": "", "boxes": []}
 
         logger.info(f"Client connected with ID: {client_id}")
         last_log_text = ""
@@ -94,8 +97,6 @@ class ConnectionManager:
                     new_frame_event.set()
             except WebSocketDisconnect:
                 logger.info(f"Receive loop for {client_id} disconnected.")
-            except Exception as e:
-                logger.error(f"Error in receive loop for {client_id}: {e}")
             finally:
                 running = False
                 new_frame_event.set()
@@ -122,7 +123,6 @@ class ConnectionManager:
                     diff = cv2.absdiff(frame, last_frame)
                     change_percentage = np.count_nonzero(diff) / frame.size
                     if change_percentage < 0.1:
-                        # If scene is static, send the last known result to prevent flickering
                         await websocket.send_text(json.dumps(self.last_detection_result[client_id]))
                         continue
                     elif change_percentage > 0.8:
@@ -187,13 +187,13 @@ class ConnectionManager:
                 result = await run_in_threadpool(process_frame_logic)
 
                 if result:
-                    self.last_detection_result[client_id] = result # Cache the latest result
-                    if result["text"] != last_log_text and result["text"] != "":
-                        logger.info(f"Detection for {client_id[:8]}: {result['text']}")
+                    self.last_detection_result[client_id] = result
+                    if result["text"] and result["text"] != last_log_text:
+                        logger.info(f"Speaking for {client_id[:8]}: {result['text']}")
+                        await self.voice_assistant.speak(result["text"])
                         last_log_text = result["text"]
                     await websocket.send_text(json.dumps(result))
                 else:
-                    # Fallback to sending the last known result
                     await websocket.send_text(json.dumps(self.last_detection_result[client_id]))
 
         except Exception as e:
@@ -213,3 +213,20 @@ class ConnectionManager:
             if client_id in self.last_processed_frame: del self.last_processed_frame[client_id]
             if client_id in self.last_detection_result: del self.last_detection_result[client_id]
             logger.info(f"Client {client_id} disconnected and cleaned up.")
+
+# Determine the base path for bundled files in PyInstaller
+if getattr(sys, 'frozen', False):
+    # Running in a PyInstaller bundle
+    bundle_dir = sys._MEIPASS
+else:
+    # Running in a normal Python environment
+    # Assume the model is in the project root, which is two levels up from app/api/routes.py
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    project_root = os.path.abspath(os.path.join(current_dir, '..', '..'))
+    bundle_dir = project_root
+
+model_file_name = "yolo26n-seg.pt"
+model_path_to_use = os.path.join(bundle_dir, model_file_name)
+
+detector = YoloDetector(model_path=model_path_to_use)
+manager = ConnectionManager(detector=detector)

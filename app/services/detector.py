@@ -5,6 +5,7 @@ import numpy as np
 import torch
 from ultralytics import YOLO
 from app.domain.models import DetectionResult
+from app.config import settings # Import settings
 
 logger = logging.getLogger(__name__)
 
@@ -67,11 +68,11 @@ RUSSIAN_NAMES = {
 class YoloDetector:
     def __init__(
             self,
-            model_path: str = "yolov8n-seg.pt",
-            conf_threshold: float = 0.5,
-            focal_length: float = 1680,
+            model_path: str = settings.DETECTOR_MODEL_PATH, # Use setting
+            conf_threshold: float = settings.DETECTOR_CONF_THRESHOLD, # Use setting
+            focal_length: float = settings.DETECTOR_FOCAL_LENGTH, # Use setting
     ):
-        self.device = 'cuda:0' if torch.cuda.is_available() else 'cpu'
+        self.device = 'cuda:1' if torch.cuda.is_available() else 'cpu'
         logger.info(f"Initializing YOLO model on device: {self.device}")
 
         self.model = YOLO(model_path)
@@ -136,7 +137,7 @@ class YoloDetector:
             persist=True,
             verbose=False,
             rect=True,
-            imgsz=640,
+            imgsz=settings.DETECTOR_IMG_SIZE, # Use setting
             conf=self.conf_threshold,
             iou=0.7,
             device=self.device
