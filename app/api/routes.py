@@ -6,6 +6,8 @@ import uuid
 import asyncio
 import os
 import sys
+import shutil
+import requests
 from typing import Dict
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from app.services.detector import ObjectDetector, YoloDetector
@@ -14,6 +16,7 @@ from starlette.concurrency import run_in_threadpool
 from app.domain.priorities import HIGH_PRIORITY_OBJECTS, MEDIUM_PRIORITY_OBJECTS
 from app.domain.message_formatter import format_message, RUSSIAN_NAMES
 from app.services.voice_output import VoiceAssistant
+from app.config import settings
 
 logging.basicConfig(
     level=logging.INFO,
@@ -218,15 +221,44 @@ class ConnectionManager:
 if getattr(sys, 'frozen', False):
     # Running in a PyInstaller bundle
     bundle_dir = sys._MEIPASS
+    model_file_name = settings.DETECTOR_MODEL_PATH
+    model_path_to_use = os.path.join(bundle_dir, model_file_name)
+    if not os.path.exists(model_path_to_use):
+         # If not found in MEIPASS, try checking adjacent to executable
+         exe_dir = os.path.dirname(sys.executable)
+         model_path_to_use = os.path.join(exe_dir, model_file_name)
+
 else:
     # Running in a normal Python environment
     # Assume the model is in the project root, which is two levels up from app/api/routes.py
     current_dir = os.path.dirname(os.path.abspath(__file__))
     project_root = os.path.abspath(os.path.join(current_dir, '..', '..'))
     bundle_dir = project_root
+    model_file_name = settings.DETECTOR_MODEL_PATH
+    model_path_to_use = os.path.join(bundle_dir, model_file_name)
 
-model_file_name = "yolov8n-seg.pt"
-model_path_to_use = os.path.join(bundle_dir, model_file_name)
+def download_file(url, filename):
+    try:
+        logger.info(f"Downloading model from {url} to {filename}...")
+        response = requests.get(url, stream=True)
+        response.raise_for_status()
+        with open(filename, 'wb') as f:
+            for chunk in response.iter_content(chunk_size=8192):
+                f.write(chunk)
+        logger.info(f"Downloaded {filename}")
+        return True
+    except Exception as e:
+        logger.error(f"Failed to download {filename}: {e}")
+        return False
+
+# Ensure model exists
+if not os.path.exists(model_path_to_use):
+    logger.info(f"Model not found at {model_path_to_use}. Attempting download...")
+    model_url = "https://github.com/ultralytics/assets/releases/download/v8.2.0/yolo26n-seg.pt"
+
+    if not download_file(model_url, model_path_to_use):
+
+         pass
 
 detector = YoloDetector(model_path=model_path_to_use)
 manager = ConnectionManager(detector=detector)
