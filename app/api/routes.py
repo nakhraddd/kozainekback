@@ -254,7 +254,7 @@ def download_file(url, filename):
 # Ensure model exists
 if not os.path.exists(model_path_to_use):
     logger.info(f"Model not found at {model_path_to_use}. Attempting download...")
-    model_url = "https://github.com/ultralytics/assets/releases/download/v8.2.0/yolo26n-seg.pt"
+    model_url = "https://github.com/ultralytics/assets/releases/download/v8.2.0/yolov8n-seg.pt"
 
     if not download_file(model_url, model_path_to_use):
 
