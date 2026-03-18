@@ -72,7 +72,7 @@ class YoloDetector:
             conf_threshold: float = settings.DETECTOR_CONF_THRESHOLD, # Use setting
             focal_length: float = settings.DETECTOR_FOCAL_LENGTH, # Use setting
     ):
-        self.device = 'cuda:1' if torch.cuda.is_available() else 'cpu'
+        self.device = 'cuda:0' if torch.cuda.is_available() else 'cpu'
         logger.info(f"Initializing YOLO model on device: {self.device}")
 
         self.model = YOLO(model_path)

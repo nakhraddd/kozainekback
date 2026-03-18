@@ -4,6 +4,7 @@ from app.services.camera_service import CameraService
 import logging
 import sys
 import os
+import torch
 from pyngrok import ngrok
 from starlette.concurrency import run_in_threadpool
 import asyncio
@@ -37,6 +38,15 @@ async def lifespan(app: FastAPI):
     # Startup logic
     logger.info("Starting up application...")
     
+    # Log CUDA availability
+    if torch.cuda.is_available():
+        count = torch.cuda.device_count()
+        logger.info(f"CUDA is available! Found {count} device(s).")
+        for i in range(count):
+            logger.info(f"CUDA Device {i}: {torch.cuda.get_device_name(i)}")
+    else:
+        logger.warning("CUDA is NOT available. Application will run on CPU.")
+
     # Start Ngrok Tunnel
     try:
         tunnel = await run_in_threadpool(ngrok.connect, 8000, domain="anemone-intimate-utterly.ngrok-free.app")
