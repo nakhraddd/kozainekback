@@ -225,7 +225,7 @@ else:
     project_root = os.path.abspath(os.path.join(current_dir, '..', '..'))
     bundle_dir = project_root
 
-model_file_name = "yolo26n-seg.pt"
+model_file_name = "yolov8n-seg.pt"
 model_path_to_use = os.path.join(bundle_dir, model_file_name)
 
 detector = YoloDetector(model_path=model_path_to_use)

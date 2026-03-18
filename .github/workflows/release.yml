@@ -27,12 +27,12 @@ jobs:
         pip install -r requirements.txt
         pip install pyinstaller
 
-    - name: Prepare Assets (Model & Font)
+    - name: Check for Custom Model & Prepare Font
       run: |
-        # Download YOLO26n-seg model if it doesn't exist
+        # Check if the custom model exists in the repo
         if (-Not (Test-Path "yolov8n-seg.pt")) {
-            Write-Host "Downloading YOLO model..."
-            Invoke-WebRequest -Uri "https://github.com/ultralytics/assets/releases/download/v8.2.0/yolov26n-seg.pt" -OutFile "yolov26n-seg.pt"
+            Write-Error "Error: 'yolov8n-seg.pt' was not found. This appears to be a custom model. You MUST add and push this file to your GitHub repository for the build to succeed."
+            exit 1
         }
         
         # Ensure Arial font exists (copy from System if not in repo)
@@ -43,7 +43,7 @@ jobs:
 
     - name: Build with PyInstaller
       run: |
-        pyinstaller --name Kozainek --onedir --add-data "app;app" --add-data "yolov26n-seg.pt;." --add-data "arial.ttf;." --hidden-import "cv2" --hidden-import "torch" --hidden-import "ultralytics" --hidden-import "PIL" --hidden-import "numpy" --hidden-import "scipy" --hidden-import "websockets" --hidden-import "fastapi" --hidden-import "uvicorn" --hidden-import "starlette" --hidden-import "pydantic" --hidden-import "httpx" --hidden-import "polars" --hidden-import "yaml" --hidden-import "pyngrok" app/main.py -y
+        pyinstaller --name Kozainek --onedir --add-data "app;app" --add-data "yolov8n-seg.pt;." --add-data "arial.ttf;." --hidden-import "cv2" --hidden-import "torch" --hidden-import "ultralytics" --hidden-import "PIL" --hidden-import "numpy" --hidden-import "scipy" --hidden-import "websockets" --hidden-import "fastapi" --hidden-import "uvicorn" --hidden-import "starlette" --hidden-import "pydantic" --hidden-import "httpx" --hidden-import "polars" --hidden-import "yaml" --hidden-import "pyngrok" app/main.py -y
 
     - name: Zip the build
       run: |
