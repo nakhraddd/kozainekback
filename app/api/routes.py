@@ -8,11 +8,12 @@ import os
 import sys
 import shutil
 import requests
+import websockets
+from urllib.parse import urlparse, parse_qs
 from typing import Dict
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Request
+
 from app.services.detector import ObjectDetector, YoloDetector
 from app.domain.logic import SpatialAnalyzer
-from starlette.concurrency import run_in_threadpool
 from app.domain.priorities import HIGH_PRIORITY_OBJECTS, MEDIUM_PRIORITY_OBJECTS
 from app.domain.message_formatter import format_message, RUSSIAN_NAMES
 from app.services.voice_output import VoiceAssistant
@@ -25,14 +26,13 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-router = APIRouter()
-
 # --- Global State for Camera Management ---
-ACTIVE_CLIENTS: Dict[str, WebSocket] = {}
+ACTIVE_CLIENTS: Dict[str, websockets.ServerConnection] = {}
 LATEST_FRAMES: Dict[str, bytes] = {}
 
-@router.get("/cameras")
-async def get_cameras():
+
+def get_cameras():
+    """Direct memory access for CameraService, replacing the old HTTP endpoint."""
     cameras = [{"id": "local_0", "name": "Local Server Webcam", "type": "local"}]
     for client_id in ACTIVE_CLIENTS:
         cameras.append({
@@ -43,43 +43,15 @@ async def get_cameras():
         })
     return cameras
 
-@router.post("/set_language")
-async def set_language(request: Request):
-    try:
-        data = await request.json()
-        language = data.get("language")
-        if language:
-            # We still set global voice assistant for now, but client states handle text.
-            manager.voice_assistant.set_language(language)
-            manager.current_language = language 
-            return {"status": "ok", "language": language}
-        return {"status": "error", "message": "Language not provided"}, 400
-    except Exception as e:
-        logger.error(f"Error setting language: {e}")
-        return {"status": "error", "message": str(e)}, 500
-
-@router.websocket("/ws/view/{source_id}")
-async def view_stream_endpoint(websocket: WebSocket, source_id: str):
-    await websocket.accept()
-    logger.info(f"Viewer connected to watch stream from: {source_id}")
-    try:
-        while source_id in ACTIVE_CLIENTS:
-            if source_id in LATEST_FRAMES:
-                try:
-                    await websocket.send_bytes(LATEST_FRAMES[source_id])
-                except WebSocketDisconnect:
-                    break
-            else:
-                await asyncio.sleep(0.1)
-    except WebSocketDisconnect:
-        logger.info(f"Viewer for stream {source_id} disconnected.")
-    except Exception as e:
-        logger.error(f"Error in viewer for stream {source_id}: {e}")
 
 def get_priority_level(english_name: str) -> int:
-    if english_name in HIGH_PRIORITY_OBJECTS: return 3
-    elif english_name in MEDIUM_PRIORITY_OBJECTS: return 2
-    else: return 1
+    if english_name in HIGH_PRIORITY_OBJECTS:
+        return 3
+    elif english_name in MEDIUM_PRIORITY_OBJECTS:
+        return 2
+    else:
+        return 1
+
 
 class ConnectionManager:
     def __init__(self, detector: ObjectDetector):
@@ -90,17 +62,18 @@ class ConnectionManager:
         self.last_processed_frame = {}
         self.last_detection_result = {}
         self.current_language = "RUSSIAN"
-        self.client_states = {} # Map client_id -> {"language": "RUSSIAN"}
+        self.client_states = {}
 
-    async def handle_ws(self, websocket: WebSocket):
-        await websocket.accept()
+    async def handle_ws(self, websocket):
         client_id = str(uuid.uuid4())
         ACTIVE_CLIENTS[client_id] = websocket
-        
-        # Check query params for language
-        query_lang = websocket.query_params.get("lang")
+
+        # Parse query parameters from the raw WebSocket URI
+        parsed_path = urlparse(websocket.request.path)
+        query_params = parse_qs(parsed_path.query)
+        query_lang = query_params.get("lang", ["RUSSIAN"])[0]
         initial_lang = query_lang if query_lang in ["ENGLISH", "RUSSIAN", "KAZAKH"] else "RUSSIAN"
-        
+
         self.client_states[client_id] = {"language": initial_lang}
         self.previous_tracked_objects[client_id] = set()
         self.previous_static_objects[client_id] = set()
@@ -109,7 +82,7 @@ class ConnectionManager:
 
         logger.info(f"Client connected with ID: {client_id}, Lang: {initial_lang}")
         last_log_text = ""
-        
+
         new_frame_event = asyncio.Event()
         running = True
 
@@ -117,15 +90,15 @@ class ConnectionManager:
             nonlocal running
             try:
                 while running:
-                    # Receive either bytes (frame) or text (control message)
-                    message = await asyncio.wait_for(websocket.receive(), timeout=10.0)
-                    
-                    if "bytes" in message and message["bytes"]:
-                        LATEST_FRAMES[client_id] = message["bytes"]
+                    # Pure websockets recv() returns bytes for binary frames, str for text
+                    message = await asyncio.wait_for(websocket.recv(), timeout=10.0)
+
+                    if isinstance(message, bytes):
+                        LATEST_FRAMES[client_id] = message
                         new_frame_event.set()
-                    elif "text" in message and message["text"]:
+                    elif isinstance(message, str):
                         try:
-                            data = json.loads(message["text"])
+                            data = json.loads(message)
                             if data.get("action") == "set_language":
                                 new_lang = data.get("language")
                                 if new_lang in ["ENGLISH", "RUSSIAN", "KAZAKH"]:
@@ -133,8 +106,8 @@ class ConnectionManager:
                                     logger.info(f"Client {client_id} changed language to {new_lang}")
                         except json.JSONDecodeError:
                             logger.warning(f"Invalid JSON from client {client_id}")
-                            
-            except (WebSocketDisconnect, asyncio.TimeoutError):
+
+            except (websockets.exceptions.ConnectionClosed, asyncio.TimeoutError):
                 logger.warning(f"Client {client_id} disconnected or timed out.")
             finally:
                 running = False
@@ -162,7 +135,7 @@ class ConnectionManager:
                     diff = cv2.absdiff(frame, last_frame)
                     change_percentage = np.count_nonzero(diff) / frame.size
                     if change_percentage < 0.1:
-                        if running: await websocket.send_text(json.dumps(self.last_detection_result[client_id]))
+                        if running: await websocket.send(json.dumps(self.last_detection_result[client_id]))
                         continue
                     elif change_percentage > 0.8:
                         self.previous_tracked_objects[client_id].clear()
@@ -174,16 +147,11 @@ class ConnectionManager:
                     raw_detections = self.detector.detect(frame)
 
                     if not raw_detections:
-                        # Clear tracking on empty frame if desired, or keep memory
-                        # If we clear, static objects might be re-announced instantly when they reappear
-                        # self.previous_tracked_objects[client_id].clear()
-                        # self.previous_static_objects[client_id].clear()
                         return {"text": "", "boxes": []}
 
                     newly_spoken_objects = []
                     current_tracked = set()
                     current_static = set()
-                    
                     all_detected_objects = []
 
                     for raw_det in raw_detections:
@@ -192,12 +160,10 @@ class ConnectionManager:
 
                         if processed_obj.track_id is not None:
                             current_tracked.add(processed_obj.track_id)
-                            # Only announce if track_id was NOT in the PREVIOUS set
                             if processed_obj.track_id not in self.previous_tracked_objects.get(client_id, set()):
                                 newly_spoken_objects.append(processed_obj)
                         else:
                             current_static.add(processed_obj.name)
-                            # For static objects (no track_id), check name
                             if processed_obj.name not in self.previous_static_objects.get(client_id, set()):
                                 newly_spoken_objects.append(processed_obj)
 
@@ -205,7 +171,6 @@ class ConnectionManager:
                     self.previous_static_objects[client_id] = current_static
                     self.last_processed_frame[client_id] = frame.copy()
 
-                    # Use client-specific language
                     client_lang = self.client_states.get(client_id, {}).get("language", "RUSSIAN")
                     text_result = format_message(newly_spoken_objects, language=client_lang)
 
@@ -213,9 +178,10 @@ class ConnectionManager:
                     for item in all_detected_objects:
                         proc_obj = item["processed"]
                         raw_obj = item["raw"]
-                        english_name = next((en for en, ru in RUSSIAN_NAMES.items() if ru == proc_obj.name), proc_obj.name)
+                        english_name = next((en for en, ru in RUSSIAN_NAMES.items() if ru == proc_obj.name),
+                                            proc_obj.name)
                         priority = get_priority_level(english_name)
-                        
+
                         response_boxes.append({
                             "name": proc_obj.name,
                             "xmin": round(proc_obj.normalized_box[0], 4), "ymin": round(proc_obj.normalized_box[1], 4),
@@ -223,39 +189,29 @@ class ConnectionManager:
                             "distance_cm": round(proc_obj.distance_cm, 2) if proc_obj.distance_cm is not None else None,
                             "confidence": round(raw_obj.confidence, 4),
                             "priority": priority,
-                            "mask_points": [[round(p, 4) for p in point] for point in proc_obj.normalized_mask_points] if proc_obj.normalized_mask_points else None,
+                            "mask_points": [[round(p, 4) for p in point] for point in
+                                            proc_obj.normalized_mask_points] if proc_obj.normalized_mask_points else None,
                             "track_id": proc_obj.track_id
                         })
 
                     return {"text": text_result, "boxes": response_boxes}
 
-                result = await run_in_threadpool(process_frame_logic)
+                # Replaced Starlette's threadpool with standard asyncio
+                result = await asyncio.to_thread(process_frame_logic)
 
                 if running:
                     if result:
                         self.last_detection_result[client_id] = result
-                        # Only speak on SERVER if this client triggered it? 
-                        # Or if Android handles speech, we rely on 'text' in JSON.
-                        # Assuming Android handles speech:
-                        
-                        # But for server-side speech (if desired):
-                        # We might need to switch global voice assistant language dynamically or ignore server speech.
-                        # For now, we update server speech too, but beware race conditions with multiple clients.
                         if result["text"] and result["text"] != last_log_text:
                             logger.info(f"Detected for {client_id[:8]}: {result['text']}")
-                            
-                            # Optional: Update server voice to match client (flawed if multi-client)
-                            # manager.voice_assistant.set_language(client_lang)
-                            # await self.voice_assistant.speak(result["text"])
-                            
                             last_log_text = result["text"]
-                        
-                        await websocket.send_text(json.dumps(result))
-                    else:
-                        await websocket.send_text(json.dumps(self.last_detection_result[client_id]))
 
-        except WebSocketDisconnect:
-             logger.info(f"WebSocket disconnected for client {client_id}.")
+                        await websocket.send(json.dumps(result))
+                    else:
+                        await websocket.send(json.dumps(self.last_detection_result[client_id]))
+
+        except websockets.exceptions.ConnectionClosed:
+            logger.info(f"WebSocket disconnected for client {client_id}.")
         except Exception as e:
             if running:
                 logger.error(f"Error in processor loop for {client_id}: {e}", exc_info=True)
@@ -276,25 +232,22 @@ class ConnectionManager:
             if client_id in self.client_states: del self.client_states[client_id]
             logger.info(f"Client {client_id} disconnected and cleaned up.")
 
-# Determine the base path for bundled files in PyInstaller
+
+# --- Model Loading Logic ---
 if getattr(sys, 'frozen', False):
-    # Running in a PyInstaller bundle
     bundle_dir = sys._MEIPASS
     model_file_name = settings.DETECTOR_MODEL_PATH
     model_path_to_use = os.path.join(bundle_dir, model_file_name)
     if not os.path.exists(model_path_to_use):
-         # If not found in MEIPASS, try checking adjacent to executable
-         exe_dir = os.path.dirname(sys.executable)
-         model_path_to_use = os.path.join(exe_dir, model_file_name)
-
+        exe_dir = os.path.dirname(sys.executable)
+        model_path_to_use = os.path.join(exe_dir, model_file_name)
 else:
-    # Running in a normal Python environment
-    # Assume the model is in the project root, which is two levels up from app/api/routes.py
     current_dir = os.path.dirname(os.path.abspath(__file__))
     project_root = os.path.abspath(os.path.join(current_dir, '..', '..'))
     bundle_dir = project_root
     model_file_name = settings.DETECTOR_MODEL_PATH
     model_path_to_use = os.path.join(bundle_dir, model_file_name)
+
 
 def download_file(url, filename):
     try:
@@ -310,14 +263,11 @@ def download_file(url, filename):
         logger.error(f"Failed to download {filename}: {e}")
         return False
 
-# Ensure model exists
+
 if not os.path.exists(model_path_to_use):
     logger.info(f"Model not found at {model_path_to_use}. Attempting download...")
     model_url = "https://github.com/ultralytics/assets/releases/download/v8.2.0/yolov8n-seg.pt"
-
-    if not download_file(model_url, model_path_to_use):
-
-         pass
+    download_file(model_url, model_path_to_use)
 
 detector = YoloDetector(model_path=model_path_to_use)
 manager = ConnectionManager(detector=detector)
