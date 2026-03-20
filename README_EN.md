@@ -104,4 +104,9 @@ The current implementation includes an enhanced MVP with the following features:
 
 ---
 
+## 6. Android app to use as camera
+   [download](https://github.com/nakhraddd/KozAInek)
+
+---
+
 **Developed by:** Darkhan Tastanov (2026)
