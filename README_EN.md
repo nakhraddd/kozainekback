@@ -65,7 +65,7 @@ The current implementation includes an enhanced MVP with the following features:
 *   Webcam
 
 ### Instructions
-  [download](https://github.com/nakhraddd/kozainekback/releases/download/latest/Kozainek-Windows.zip)
+  [download](https://github.com/nakhraddd/kozainekback/releases)
 
   Extract kozainek folder
 
