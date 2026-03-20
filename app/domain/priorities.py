@@ -24,3 +24,4 @@ MEDIUM_PRIORITY_OBJECTS = {
 }
 
 # Low priority objects are any objects not in the high or medium lists.
+LOW_PRIORITY_OBJECTS = set() # Defined as empty set, effectively "all others" in logic

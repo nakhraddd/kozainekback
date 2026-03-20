@@ -9,12 +9,31 @@ import httpx
 import logging
 from concurrent.futures import ThreadPoolExecutor
 
-from app.domain.priorities import HIGH_PRIORITY_OBJECTS, MEDIUM_PRIORITY_OBJECTS
-from app.services.detector import RUSSIAN_NAMES
+from app.domain.priorities import HIGH_PRIORITY_OBJECTS, MEDIUM_PRIORITY_OBJECTS, LOW_PRIORITY_OBJECTS
+from app.domain.message_formatter import RUSSIAN_NAMES
 from app.config import settings
 
 # Configure logging for this service
 logger = logging.getLogger(__name__)
+
+# UI Translations
+UI_TRANSLATIONS = {
+    "RUSSIAN": {
+        "masks": "Маски", "boxes": "Рамки", "lang": "Язык", "quit": "Выход",
+        "on": "ВКЛ", "off": "ВЫКЛ", "select_src": "Выберите источник камеры:",
+        "settings": "Настройки KOZAINEK:"
+    },
+    "ENGLISH": {
+        "masks": "Masks", "boxes": "Boxes", "lang": "Lang", "quit": "Quit",
+        "on": "ON", "off": "OFF", "select_src": "Select Camera Source:",
+        "settings": "KOZAINEK Settings:"
+    },
+    "KAZAKH": {
+        "masks": "Маскалар", "boxes": "Рамкалар", "lang": "Тіл", "quit": "Шығу",
+        "on": "ҚОСУ", "off": "ӨШІРУ", "select_src": "Камера көзін таңдаңыз:",
+        "settings": "KOZAINEK Баптаулары:"
+    }
+}
 
 class CameraService:
     def __init__(self):
@@ -23,13 +42,20 @@ class CameraService:
         self.font = self._load_font()
         self.latest_detections = []
         self.latest_frame_to_send = None
+        self.latest_frame_received = None # For decoupling
         self.running = False # Flag for detection_worker
         self.executor = ThreadPoolExecutor(max_workers=1)
 
         self.selection_window_name = "Select Camera Source & Settings"
         self.stream_window_name = "Object Detection Stream"
         self.active_stream_task = None
-        self.exit_service_flag = False # Flag to exit the entire CameraService
+        self.exit_service_flag = False 
+        
+        self.draw_masks = True
+        self.draw_boxes = True
+        
+        self.languages = ["RUSSIAN", "ENGLISH", "KAZAKH"]
+        self.current_lang_idx = 0
 
     def _load_font(self):
         try:
@@ -37,6 +63,10 @@ class CameraService:
         except IOError:
             logger.warning(f"{settings.VISUALIZATION_FONT_PATH} not found, using default font. Russian characters might not display correctly.")
             return ImageFont.load_default()
+
+    def _get_ui_text(self, key):
+        lang = self.languages[self.current_lang_idx]
+        return UI_TRANSLATIONS.get(lang, UI_TRANSLATIONS["ENGLISH"]).get(key, key)
 
     async def _fetch_available_cameras(self):
         try:
@@ -47,6 +77,16 @@ class CameraService:
         except (httpx.RequestError, json.JSONDecodeError) as e:
             logger.error(f"Error fetching camera list: {e}. Falling back to local webcam.")
             return [{"id": "local_0", "name": "Local Webcam (Fallback)", "type": "local"}]
+            
+    async def _update_language(self):
+        """Notifies the backend about the language change."""
+        lang = self.languages[self.current_lang_idx]
+        logger.info(f"Switching language to: {lang}")
+        try:
+            async with httpx.AsyncClient() as client:
+                await client.post(f"{self.server_http_url}/set_language", json={"language": lang})
+        except Exception as e:
+            logger.error(f"Failed to set language: {e}")
 
     async def run_gui_and_stream_manager(self):
         cv2.namedWindow(self.selection_window_name)
@@ -58,19 +98,16 @@ class CameraService:
         while not self.exit_service_flag:
             current_time = asyncio.get_event_loop().time()
             
-            # Refresh list every 2 seconds
             if current_time - last_fetch_time > 2.0:
                 fetched_cameras = await self._fetch_available_cameras()
                 if not fetched_cameras:
                     fetched_cameras = [{"id": "local_0", "name": "Local Webcam (Fallback)", "type": "local"}]
                 
-                # Only redraw if the list has changed
-                if str(fetched_cameras) != last_camera_list_str:
-                    logger.info(f"Camera list updated: {fetched_cameras}")
+                if str(fetched_cameras) != last_camera_list_str or True:
                     available_cameras = fetched_cameras
                     last_camera_list_str = str(available_cameras)
 
-                    num_settings_lines = 5
+                    num_settings_lines = 6
                     display_height = max(300, len(available_cameras) * 30 + num_settings_lines * 25 + 120)
                     selection_image = np.zeros((display_height, 600, 3), dtype=np.uint8)
                     selection_image.fill(40)
@@ -79,7 +116,7 @@ class CameraService:
                     draw = ImageDraw.Draw(pil_img)
 
                     y_offset = 20
-                    draw.text((20, y_offset), "KOZAINEK Settings:", font=self.font, fill=(255, 255, 0))
+                    draw.text((20, y_offset), self._get_ui_text("settings"), font=self.font, fill=(255, 255, 0))
                     y_offset += 30
                     draw.text((40, y_offset), f"Model: {settings.DETECTOR_MODEL_PATH}", font=self.font, fill=(200, 200, 200))
                     y_offset += 25
@@ -88,14 +125,19 @@ class CameraService:
                     draw.text((40, y_offset), f"Server URL: {settings.SERVER_HTTP_URL}", font=self.font, fill=(200, 200, 200))
                     y_offset += 25
                     draw.text((40, y_offset), f"Detection WS: {settings.DETECTION_WEBSOCKET_URL}", font=self.font, fill=(200, 200, 200))
+                    y_offset += 25
+                    
+                    lang_label = self._get_ui_text("lang")
+                    lang_name = self.languages[self.current_lang_idx]
+                    draw.text((40, y_offset), f"{lang_label}: {lang_name} [L]", font=self.font, fill=(0, 255, 255))
                     y_offset += 40
 
-                    draw.text((20, y_offset), "Select a Camera Source:", font=self.font, fill=(255, 255, 255))
+                    draw.text((20, y_offset), self._get_ui_text("select_src"), font=self.font, fill=(255, 255, 255))
                     y_offset += 30
                     for i, cam in enumerate(available_cameras):
                         draw.text((40, y_offset), f"{i + 1}. {cam['name']}", font=self.font, fill=(200, 200, 200))
                         y_offset += 30
-                    draw.text((40, y_offset + 10), "Q. Quit Service", font=self.font, fill=(255, 100, 100))
+                    draw.text((40, y_offset + 10), f"Q. {self._get_ui_text('quit')}", font=self.font, fill=(255, 100, 100))
 
                     selection_image = cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
                     cv2.imshow(self.selection_window_name, selection_image)
@@ -107,6 +149,9 @@ class CameraService:
                 self.exit_service_flag = True
                 logger.info("Quit key pressed. Exiting CameraService.")
                 break
+            elif key == ord('l') or key == ord('L'):
+                self.current_lang_idx = (self.current_lang_idx + 1) % len(self.languages)
+                await self._update_language()
 
             if ord('1') <= key <= ord('9'):
                 idx = int(chr(key)) - 1
@@ -114,198 +159,259 @@ class CameraService:
                     selected_camera = available_cameras[idx]
                     logger.info(f"Selected camera: {selected_camera['name']}")
                     
-                    # Cancel any existing stream task
                     if self.active_stream_task:
-                        logger.info("Cancelling previous stream task.")
                         self.active_stream_task.cancel()
-                        try:
-                            await self.active_stream_task
-                        except asyncio.CancelledError:
-                            pass
-                        # Removed: cv2.destroyWindow(self.stream_window_name) # This is now handled by _run_stream_task's finally block
+                        try: await self.active_stream_task
+                        except: pass
                     
-                    # Start new stream task
                     self.active_stream_task = asyncio.create_task(self._run_stream_task(selected_camera))
                     
-            await asyncio.sleep(0.01) # Yield control
+            await asyncio.sleep(0.01)
 
-        # Final cleanup when the manager loop exits
         if self.active_stream_task:
             self.active_stream_task.cancel()
-            try:
-                await self.active_stream_task
-            except asyncio.CancelledError:
-                pass
-        cv2.destroyAllWindows() # Destroy all remaining OpenCV windows
+            try: await self.active_stream_task
+            except: pass
+        cv2.destroyAllWindows()
         logger.info("CameraService manager shut down.")
 
-    async def detection_worker(self, ws):
-        """Background task to handle sending frames and receiving detections."""
-        logger.info("Detection worker started.")
-        while self.running:
-            if self.latest_frame_to_send is not None:
-                frame = self.latest_frame_to_send
-                
-                h, w = frame.shape[:2]
-                scale = settings.DETECTOR_IMG_SIZE / w if w > settings.DETECTOR_IMG_SIZE else 1.0
-                if scale < 1.0:
-                    small_frame = cv2.resize(frame, (int(w * scale), int(h * scale)))
-                else:
-                    small_frame = frame
-
-                _, buffer = cv2.imencode('.jpg', small_frame)
-                
-                try:
-                    await ws.send(buffer.tobytes())
-                    response = await ws.recv()
-                    data = json.loads(response)
-                    self.latest_detections = data.get('boxes', [])
-                except websockets.exceptions.ConnectionClosed:
-                    logger.warning("Detection worker: Connection was closed during operation.")
-                    break
-                except asyncio.CancelledError:
-                    logger.info("Detection worker: Task was cancelled.")
-                    break
-                except Exception as e:
-                    if self.running:
-                        logger.error(f"An unexpected error occurred in detection worker: {e}")
-                    await asyncio.sleep(0.1)
-            else:
-                await asyncio.sleep(0.01)
-        logger.info("Detection worker finished.")
-
     async def _run_stream_task(self, source):
+        # We decouple frame receiving from frame display/UI handling to ensure UI is responsive
         video_capture = None
         stream_ws = None
         detection_ws = None
-        self.running = True # Signal detection_worker to run
-        self.latest_detections = []
-        self.latest_frame_to_send = None
         detection_task = None
+        receiver_task = None
+        
+        self.latest_frame_to_send = None
+        self.latest_frame_received = None
+        self.latest_detections = []
+        self.running = True
+
+        async def frame_receiver_loop():
+            nonlocal video_capture, stream_ws
+            logger.info("Frame receiver loop started.")
+            loop = asyncio.get_event_loop()
+            
+            while self.running:
+                try:
+                    frame = None
+                    if video_capture:
+                        ret, frame = await loop.run_in_executor(self.executor, video_capture.read)
+                        if not ret:
+                            logger.warning("Failed to read frame.")
+                            break # Stop loop if local cam fails
+                        frame = cv2.flip(frame, 1)
+                    elif stream_ws:
+                        # Wait with timeout to allow checking self.running
+                        try:
+                            data = await asyncio.wait_for(stream_ws.recv(), timeout=1.0)
+                            np_arr = np.frombuffer(data, np.uint8)
+                            frame = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
+                        except asyncio.TimeoutError:
+                            continue # Just check loop condition again
+                    
+                    if frame is not None:
+                        self.latest_frame_received = frame
+                        self.latest_frame_to_send = frame.copy() # For detection
+                    else:
+                        await asyncio.sleep(0.01)
+                        
+                except Exception as e:
+                    logger.error(f"Error in frame receiver: {e}")
+                    await asyncio.sleep(1)
+            logger.info("Frame receiver loop ended.")
 
         try:
+            # 1. Connect Detection
             logger.info(f"Connecting to detection WebSocket: {self.detection_ws_url}")
-            detection_ws = await websockets.connect(self.detection_ws_url)
-            
-            detection_task = asyncio.create_task(self.detection_worker(detection_ws))
+            try:
+                detection_ws = await websockets.connect(self.detection_ws_url, ping_interval=10, ping_timeout=10)
+                detection_task = asyncio.create_task(self.detection_worker(detection_ws))
+            except Exception as e:
+                logger.error(f"Failed to connect to detection WebSocket: {e}")
 
+            # 2. Connect Source
             if source['type'] == 'local':
-                video_capture = cv2.VideoCapture(settings.CAMERA_DEFAULT_ID)
-                video_capture.set(cv2.CAP_PROP_FRAME_WIDTH, settings.CAMERA_RESOLUTION_WIDTH)
-                video_capture.set(cv2.CAP_PROP_FRAME_HEIGHT, settings.CAMERA_RESOLUTION_HEIGHT)
-                video_capture.set(cv2.CAP_PROP_FPS, settings.CAMERA_FPS)
-
+                def open_cam():
+                    cap = cv2.VideoCapture(settings.CAMERA_DEFAULT_ID)
+                    cap.set(cv2.CAP_PROP_FRAME_WIDTH, settings.CAMERA_RESOLUTION_WIDTH)
+                    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, settings.CAMERA_RESOLUTION_HEIGHT)
+                    cap.set(cv2.CAP_PROP_FPS, settings.CAMERA_FPS)
+                    return cap
+                video_capture = await asyncio.get_event_loop().run_in_executor(self.executor, open_cam)
                 if not video_capture.isOpened():
-                    logger.error("Could not open local video stream.")
                     return
-                logger.info("Local webcam opened.")
             elif source['type'] == 'remote_websocket':
-                stream_ws_url = source.get('stream_ws_url')
-                if not stream_ws_url:
-                    logger.error("Remote source has no 'stream_ws_url'.")
-                    return
-                logger.info(f"Connecting to remote stream: {stream_ws_url}")
-                stream_ws = await websockets.connect(stream_ws_url)
+                stream_ws = await websockets.connect(source['stream_ws_url'], ping_interval=10, ping_timeout=10)
 
-            loop = asyncio.get_event_loop()
-            cv2.namedWindow(self.stream_window_name) # Create stream display window
+            # 3. Start Receiver Background Task
+            receiver_task = asyncio.create_task(frame_receiver_loop())
 
-            while True: # Loop until break or cancelled
-                frame = None
-                if video_capture:
-                    ret, frame = await loop.run_in_executor(self.executor, video_capture.read)
-                    if not ret:
-                        logger.warning("Failed to read frame from local camera.")
-                        break
-                    frame = cv2.flip(frame, 1)
-                elif stream_ws:
-                    try:
-                        data = await stream_ws.recv()
-                        np_arr = np.frombuffer(data, np.uint8)
-                        frame = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
-                    except websockets.exceptions.ConnectionClosed:
-                        logger.warning("Remote stream connection closed.")
-                        break
-                
-                if frame is None: continue
-
-                self.latest_frame_to_send = frame.copy()
-                self.display_frame(frame, self.latest_detections, self.stream_window_name)
-
-                if cv2.waitKey(1) & 0xFF == ord('q') or cv2.getWindowProperty(self.stream_window_name, cv2.WND_PROP_VISIBLE) < 1:
-                    logger.info("User closed the stream window or pressed 'q'.")
+            # 4. Main UI/Display Loop (runs at ~30 FPS)
+            cv2.namedWindow(self.stream_window_name)
+            
+            while self.running:
+                # Check for window close or Q
+                if cv2.getWindowProperty(self.stream_window_name, cv2.WND_PROP_VISIBLE) < 1:
                     break
                 
-                await asyncio.sleep(0.001) # Yield control
-        
-        except asyncio.CancelledError:
-            logger.info("Stream task was cancelled.")
-        except websockets.exceptions.ConnectionClosed as e:
-            logger.warning(f"WebSocket connection closed: {e}")
+                # Handle Keys - logic is now decoupled from frame arrival
+                key = cv2.waitKey(30) & 0xFF # 30ms wait ~= 33 FPS limit
+                
+                if key == ord('q'):
+                    break
+                elif key == ord('m') or key == ord('M'):
+                    self.draw_masks = not self.draw_masks
+                    logger.info(f"Toggled Masks: {self.draw_masks}")
+                elif key == ord('b') or key == ord('B'):
+                    self.draw_boxes = not self.draw_boxes
+                    logger.info(f"Toggled Boxes: {self.draw_boxes}")
+                elif key == ord('l') or key == ord('L'):
+                    self.current_lang_idx = (self.current_lang_idx + 1) % len(self.languages)
+                    await self._update_language()
+
+                # Display Frame if available
+                if self.latest_frame_received is not None:
+                    # Use copy to avoid modification during display
+                    display_frame_copy = self.latest_frame_received.copy()
+                    self.display_frame(display_frame_copy, self.latest_detections, self.stream_window_name)
+                
+                # Tiny sleep just in case, though waitKey handles delay
+                await asyncio.sleep(0.001)
+
         except Exception as e:
-            logger.error(f"An unexpected error occurred in stream task: {e}", exc_info=True)
+            logger.error(f"Error in stream task: {e}", exc_info=True)
         finally:
-            self.running = False # Signal detection_worker to stop
+            self.running = False
+            if receiver_task:
+                receiver_task.cancel()
+                try: await receiver_task
+                except: pass
+            
             if detection_task:
                 detection_task.cancel()
-                try:
-                    await detection_task
-                except asyncio.CancelledError:
-                    pass
-
-            logger.info("Cleaning up stream task resources...")
+                try: await detection_task
+                except: pass
+            
+            if detection_ws: await detection_ws.close()
             if video_capture: video_capture.release()
             if stream_ws: await stream_ws.close()
-            if detection_ws: await detection_ws.close()
+            try: cv2.destroyWindow(self.stream_window_name)
+            except: pass
+            logger.info("Stream task finished cleanup.")
+
+    async def detection_worker(self, ws):
+        logger.info("Detection worker started.")
+        while self.running:
             try:
-                cv2.destroyWindow(self.stream_window_name) # Close stream window
-            except cv2.error:
-                logger.warning(f"Window {self.stream_window_name} already destroyed.")
-            self.active_stream_task = None # Clear reference to this task
-            logger.info("Stream task finished.")
+                # We use self.latest_frame_to_send which is updated by receiver loop
+                if self.latest_frame_to_send is not None:
+                    frame = self.latest_frame_to_send
+                    h, w = frame.shape[:2]
+                    scale = settings.DETECTOR_IMG_SIZE / w if w > settings.DETECTOR_IMG_SIZE else 1.0
+                    if scale < 1.0:
+                        small_frame = cv2.resize(frame, (int(w * scale), int(h * scale)))
+                    else:
+                        small_frame = frame
+
+                    _, buffer = cv2.imencode('.jpg', small_frame)
+                    
+                    await asyncio.wait_for(ws.send(buffer.tobytes()), timeout=5.0)
+                    response = await asyncio.wait_for(ws.recv(), timeout=5.0)
+                    data = json.loads(response)
+                    self.latest_detections = data.get('boxes', [])
+                else:
+                    await asyncio.sleep(0.01)
+            except (websockets.exceptions.ConnectionClosed, asyncio.TimeoutError):
+                logger.warning("Detection WebSocket connection lost. Worker stopping.")
+                break
+            except Exception as e:
+                logger.error(f"Error in detection worker: {e}")
+                await asyncio.sleep(0.5)
+        logger.info("Detection worker stopped.")
 
     def get_color_for_object(self, russian_name):
-        english_name = next((en for en, ru in RUSSIAN_NAMES.items() if ru == russian_name), None)
-        if english_name in HIGH_PRIORITY_OBJECTS: return (0, 0, 255)
-        elif english_name in MEDIUM_PRIORITY_OBJECTS: return (0, 255, 255)
-        else: return (0, 255, 0)
+        english_name = None
+        for en, ru in RUSSIAN_NAMES.items():
+            if ru == russian_name:
+                english_name = en
+                break
+        
+        if not english_name:
+            english_name = russian_name
+
+        if english_name in HIGH_PRIORITY_OBJECTS: return (0, 0, 255) # Red (BGR)
+        elif english_name in MEDIUM_PRIORITY_OBJECTS: return (0, 255, 255) # Yellow
+        else: return (0, 255, 0) # Green
 
     def display_frame(self, frame, detections, window_name):
         h, w, _ = frame.shape
         overlay = frame.copy()
         alpha = settings.VISUALIZATION_ALPHA
 
-        for det in detections:
-            color = self.get_color_for_object(det.get('name', ''))
-            if det.get('mask_points'):
-                scaled_points = (np.array(det['mask_points']) * np.array([w, h])).astype(np.int32)
-                cv2.fillPoly(overlay, [scaled_points], color)
-            
-            if all(k in det for k in ['xmin', 'ymin', 'xmax', 'ymax']):
-                x1, y1 = int(det['xmin'] * w), int(det['ymin'] * h)
-                x2, y2 = int(det['xmax'] * w), int(det['ymax'] * h)
-                cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
-
+        # 1. Draw Masks
+        if self.draw_masks:
+            for det in detections:
+                if det.get('mask_points'):
+                    points = det['mask_points']
+                    if points:
+                        scaled_points = (np.array(points) * np.array([w, h])).astype(np.int32)
+                        color = self.get_color_for_object(det.get('name', ''))
+                        cv2.fillPoly(overlay, [scaled_points], color)
+        
+        # 2. Blend Overlay
         frame = cv2.addWeighted(overlay, alpha, frame, 1 - alpha, 0)
-        pil_image = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+        
+        # 3. Draw Boxes & Text (using PIL)
+        frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        pil_image = Image.fromarray(frame_rgb)
         draw = ImageDraw.Draw(pil_image)
 
-        for det in detections:
-            if all(k in det for k in ['xmin', 'ymin']):
-                x1, y1 = int(det['xmin'] * w), int(det['ymin'] * h)
-                label = f"{det.get('name', '')}"
-                if det.get('distance_cm') is not None:
-                    label += f" ({det['distance_cm']:.0f} cm)"
-                
-                bbox = draw.textbbox((0, 0), label, font=self.font)
-                text_height = bbox[3] - bbox[1]
-                text_y = y1 - 10 if y1 - 10 > text_height else y1 + text_height + 10
-                
-                color_bgr = self.get_color_for_object(det.get('name', ''))
-                draw.rectangle((x1, text_y - text_height - 5, x1 + bbox[2] - bbox[0] + 10, text_y + 5), fill=(color_bgr[2], color_bgr[1], color_bgr[0]))
-                draw.text((x1 + 5, text_y - text_height - 5), label, font=self.font, fill=(255, 255, 255))
+        if self.draw_boxes:
+            for det in detections:
+                if all(k in det for k in ['xmin', 'ymin', 'xmax', 'ymax']):
+                    x1, y1 = int(det['xmin'] * w), int(det['ymin'] * h)
+                    x2, y2 = int(det['xmax'] * w), int(det['ymax'] * h)
+                    
+                    color_bgr = self.get_color_for_object(det.get('name', ''))
+                    color_rgb = (color_bgr[2], color_bgr[1], color_bgr[0])
 
-        cv2.imshow(window_name, cv2.cvtColor(np.array(pil_image), cv2.COLOR_RGB2BGR))
+                    # Box
+                    draw.rectangle([x1, y1, x2, y2], outline=color_rgb, width=3)
+
+                    # Label
+                    label = f"{det.get('name', 'Unknown')}"
+                    if det.get('distance_cm') is not None:
+                        label += f" ({det['distance_cm']:.0f} cm)"
+                    
+                    bbox = draw.textbbox((0, 0), label, font=self.font)
+                    text_width = bbox[2] - bbox[0]
+                    text_height = bbox[3] - bbox[1]
+                    text_y = y1 - 10 if y1 - 10 > text_height else y1 + text_height + 10
+                    
+                    draw.rectangle((x1, text_y - text_height - 5, x1 + text_width + 10, text_y + 5), fill=color_rgb)
+                    draw.text((x1 + 5, text_y - text_height - 5), label, font=self.font, fill=(255, 255, 255))
+
+        # 4. Instructions HUD
+        mask_status = self._get_ui_text("on") if self.draw_masks else self._get_ui_text("off")
+        box_status = self._get_ui_text("on") if self.draw_boxes else self._get_ui_text("off")
+        lang_name = self.languages[self.current_lang_idx]
+        
+        instructions = [
+            f"[M] {self._get_ui_text('masks')}: {mask_status}",
+            f"[B] {self._get_ui_text('boxes')}: {box_status}",
+            f"[L] {self._get_ui_text('lang')}: {lang_name}",
+            f"[Q] {self._get_ui_text('quit')}"
+        ]
+        
+        y_text = 10
+        for instr in instructions:
+            draw.text((10, y_text), instr, font=self.font, fill=(255, 255, 255), stroke_width=2, stroke_fill=(0,0,0))
+            y_text += 25
+
+        final_frame = cv2.cvtColor(np.array(pil_image), cv2.COLOR_RGB2BGR)
+        cv2.imshow(window_name, final_frame)
 
 async def main():
     camera_service = CameraService()

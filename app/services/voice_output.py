@@ -1,138 +1,174 @@
 import asyncio
 import logging
+import os
+import tempfile
+import sys
+import shutil
+import subprocess
+import threading
+from concurrent.futures import ThreadPoolExecutor
 
 logger = logging.getLogger(__name__)
 
 class VoiceAssistant:
-    """
-    Handles text-to-speech synthesis using a persistent PowerShell process
-    and an asynchronous queue for optimized, non-blocking performance.
-    """
     def __init__(self):
         self.queue = asyncio.Queue()
         self.process = None
         self.worker_task = None
+        self.current_language = "ru-RU" 
+        self.language_map = {
+            "ENGLISH": "en-US",
+            "RUSSIAN": "ru-RU",
+            "KAZAKH": "kk-KZ"
+        }
+        self.executor = ThreadPoolExecutor(max_workers=1)
+        self.script_path = None
 
-    async def _initialize(self):
-        """
-        Starts the persistent PowerShell process and the worker task.
-        This is called lazily on the first speak request.
-        """
-        if self.process is not None:
+    def set_language(self, lang_name: str):
+        """Sets the TTS language based on the provided name (ENGLISH, RUSSIAN, KAZAKH)."""
+        if lang_name in self.language_map:
+            new_lang_code = self.language_map[lang_name]
+            if self.current_language != new_lang_code:
+                self.current_language = new_lang_code
+                self._clear_queue() # Clear pending messages in old language
+                logger.info(f"Language set to {lang_name} ({self.current_language}) - Queue cleared.")
+        else:
+            logger.warning(f"Unknown language: {lang_name}, keeping current: {self.current_language}")
+
+    def _clear_queue(self):
+        """Clears all pending messages from the queue."""
+        size = self.queue.qsize()
+        for _ in range(size):
+            try:
+                self.queue.get_nowait()
+                self.queue.task_done()
+            except asyncio.QueueEmpty:
+                break
+        if size > 0:
+            logger.info(f"Cleared {size} pending TTS messages.")
+
+    def _start_process_sync(self):
+        """Starts the persistent PowerShell TTS process synchronously (for threading)."""
+        if self.process and self.process.poll() is None:
             return
 
-        logger.info("Initializing persistent PowerShell process for TTS...")
-        # This PowerShell script loads the speech assembly once, then enters a loop
-        # to read lines from stdin and speak them.
+        logger.info("Initializing persistent PowerShell process for TTS (Synchronous)...")
+        
         ps_script = """
         Add-Type -AssemblyName System.Speech;
         $synth = New-Object System.Speech.Synthesis.SpeechSynthesizer;
-        while ($line = [Console]::In.ReadLine()) {
-            if ($line -eq 'EXIT_TTS') {
-                break;
+        
+        while ($true) {
+            $line = [Console]::In.ReadLine();
+            if ($line -eq $null -or $line -eq 'EXIT_TTS') { break }
+            
+            if ($line.Contains('|')) {
+                $parts = $line.Split('|', 2)
+                $lang = $parts[0]
+                $text = $parts[1]
+                
+                $voice = $synth.GetInstalledVoices() | Where-Object { $_.VoiceInfo.Culture.Name -eq $lang } | Select-Object -First 1
+                
+                if ($voice) {
+                    $synth.SelectVoice($voice.VoiceInfo.Name)
+                }
+                
+                $synth.SpeakAsync($text) | Out-Null
             }
-            $synth.Speak($line);
         }
         """
         
         try:
-            # Added -NoProfile and -ExecutionPolicy Bypass for robustness
-            self.process = await asyncio.create_subprocess_exec(
-                'powershell', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-',
-                stdin=asyncio.subprocess.PIPE,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE
+            if not self.script_path or not os.path.exists(self.script_path):
+                with tempfile.NamedTemporaryFile(mode='w', suffix='.ps1', delete=False, encoding='utf-8') as tmp_file:
+                    tmp_file.write(ps_script)
+                    self.script_path = tmp_file.name
+                logger.info(f"Created temp TTS script at: {self.script_path}")
+
+            powershell_exe = "powershell"
+            if shutil.which("powershell") is None:
+                sys_path = os.path.join(os.environ.get("SystemRoot", "C:\\Windows"), "System32", "WindowsPowerShell", "v1.0", "powershell.exe")
+                if os.path.exists(sys_path):
+                    powershell_exe = sys_path
+                else:
+                    logger.error("PowerShell executable not found.")
+                    return
+
+            self.process = subprocess.Popen(
+                [powershell_exe, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", self.script_path],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=False 
             )
             
-            # Send the script to the PowerShell process to execute
-            self.process.stdin.write(ps_script.encode('utf-8'))
-            await self.process.stdin.drain()
+            logger.info(f"PowerShell TTS process started (PID: {self.process.pid}).")
             
-            # Start the background worker that will process the queue
-            self.worker_task = asyncio.create_task(self._worker())
-            logger.info("TTS Worker and PowerShell process started successfully.")
-
         except Exception as e:
-            stderr_output = ""
-            if self.process and self.process.stderr:
-                try:
-                    # Attempt to read any error output from PowerShell's stderr
-                    # Use wait_for with a timeout to prevent blocking indefinitely
-                    stderr_bytes = await asyncio.wait_for(self.process.stderr.read(), timeout=1.0)
-                    stderr_output = stderr_bytes.decode('utf-8', errors='ignore').strip()
-                except asyncio.TimeoutError:
-                    stderr_output = " (stderr read timed out)"
-                except Exception as stderr_e:
-                    stderr_output = f" (error reading stderr: {stderr_e})"
-
-            logger.error(f"Failed to initialize PowerShell TTS process: {e}. PowerShell stderr: {stderr_output}")
+            logger.error(f"Failed to initialize PowerShell TTS: {type(e).__name__}: {e}")
             self.process = None
 
     async def _worker(self):
-        """The background worker that pulls text from the queue and sends it to PowerShell."""
+        """Background worker to consume the speech queue."""
+        logger.info("TTS Worker started.")
+        loop = asyncio.get_event_loop()
+        
         while True:
             try:
                 text = await self.queue.get()
-                if text is None:  # Sentinel value to stop the worker
-                    break
+                if text is None: break 
                 
-                if self.process and self.process.stdin and not self.process.stdin.is_closing():
-                    # Sanitize text and add a newline to signal 'ReadLine' in PowerShell
-                    sanitized_text = text.replace("'", "''")
-                    logger.info(f"Sending to PowerShell TTS: {sanitized_text}")
-                    self.process.stdin.write((sanitized_text + '\n').encode('utf-8'))
-                    await self.process.stdin.drain()
+                await loop.run_in_executor(self.executor, self._start_process_sync)
                 
+                if self.process and self.process.stdin:
+                    clean_text = text.replace('|', '').replace('\n', ' ').strip()
+                    # Use current_language at the moment of sending to process
+                    payload = f"{self.current_language}|{clean_text}\n"
+                    
+                    try:
+                        def write_payload():
+                            self.process.stdin.write(payload.encode('utf-8'))
+                            self.process.stdin.flush()
+                        
+                        await loop.run_in_executor(self.executor, write_payload)
+                        
+                    except (OSError, BrokenPipeError) as e:
+                        logger.warning(f"TTS process pipe error: {e}. Restarting...")
+                        if self.process:
+                            self.process.kill()
+                        self.process = None 
+                        logger.error(f"Failed to speak: {clean_text}")
+
                 self.queue.task_done()
             except asyncio.CancelledError:
-                logger.info("TTS worker task cancelled.")
                 break
             except Exception as e:
-                logger.error(f"Error in TTS worker: {e}")
+                logger.error(f"Error in TTS worker: {e}", exc_info=True)
+                await asyncio.sleep(0.5)
 
     async def speak(self, text: str):
-        """
-        Adds text to the speech queue. The call returns immediately.
-        """
-        if not text:
-            return
-        
-        # Lazily initialize the process and worker on the first call
-        if self.process is None:
-            await self._initialize()
-        
-        if self.process is None:
-            logger.error("Cannot speak, TTS process is not running.")
-            return
-
+        """Queues text for speech synthesis."""
+        if not text: return
+        if self.worker_task is None or self.worker_task.done():
+            self.worker_task = asyncio.create_task(self._worker())
         await self.queue.put(text)
 
     async def shutdown(self):
-        """Gracefully shuts down the worker and the PowerShell process."""
+        """Shuts down the TTS service."""
         logger.info("Shutting down TTS service...")
         if self.worker_task:
-            # Send sentinel value to stop the worker, or just cancel it
             self.worker_task.cancel()
-            try:
-                await self.worker_task
-            except asyncio.CancelledError:
-                pass
-
-        if self.process and self.process.stdin and not self.process.stdin.is_closing():
-            try:
-                # Tell the PowerShell loop to exit
-                self.process.stdin.write('EXIT_TTS\n'.encode('utf-8'))
-                await self.process.stdin.drain()
-            except (ConnectionResetError, BrokenPipeError) as e:
-                logger.warning(f"Pipe to PowerShell already closed: {e}")
-
-        if self.process:
-            # Give PowerShell a moment to process the EXIT_TTS command
-            try:
-                await asyncio.wait_for(self.process.wait(), timeout=5.0)
-            except asyncio.TimeoutError:
-                logger.warning("PowerShell process did not terminate gracefully, killing it.")
-                self.process.kill()
-            logger.info("PowerShell TTS process terminated.")
+            try: await self.worker_task
+            except: pass
         
+        if self.process:
+            try:
+                self.process.terminate()
+            except: pass
+            
+        if self.script_path and os.path.exists(self.script_path):
+            try: os.remove(self.script_path)
+            except: pass
+            
+        self.executor.shutdown(wait=False)
         logger.info("TTS service shut down complete.")

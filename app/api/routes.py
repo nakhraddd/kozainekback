@@ -9,7 +9,7 @@ import sys
 import shutil
 import requests
 from typing import Dict
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Request
 from app.services.detector import ObjectDetector, YoloDetector
 from app.domain.logic import SpatialAnalyzer
 from starlette.concurrency import run_in_threadpool
@@ -43,6 +43,20 @@ async def get_cameras():
         })
     return cameras
 
+@router.post("/set_language")
+async def set_language(request: Request):
+    try:
+        data = await request.json()
+        language = data.get("language")
+        if language:
+            manager.voice_assistant.set_language(language)
+            manager.current_language = language # Update state
+            return {"status": "ok", "language": language}
+        return {"status": "error", "message": "Language not provided"}, 400
+    except Exception as e:
+        logger.error(f"Error setting language: {e}")
+        return {"status": "error", "message": str(e)}, 500
+
 @router.websocket("/ws/view/{source_id}")
 async def view_stream_endpoint(websocket: WebSocket, source_id: str):
     await websocket.accept()
@@ -74,6 +88,7 @@ class ConnectionManager:
         self.previous_static_objects = {}
         self.last_processed_frame = {}
         self.last_detection_result = {}
+        self.current_language = "RUSSIAN"
 
     async def handle_ws(self, websocket: WebSocket):
         await websocket.accept()
@@ -95,11 +110,11 @@ class ConnectionManager:
             nonlocal running
             try:
                 while running:
-                    data = await websocket.receive_bytes()
+                    data = await asyncio.wait_for(websocket.receive_bytes(), timeout=10.0)
                     LATEST_FRAMES[client_id] = data
                     new_frame_event.set()
-            except WebSocketDisconnect:
-                logger.info(f"Receive loop for {client_id} disconnected.")
+            except (WebSocketDisconnect, asyncio.TimeoutError):
+                logger.warning(f"Client {client_id} disconnected or timed out.")
             finally:
                 running = False
                 new_frame_event.set()
@@ -126,7 +141,7 @@ class ConnectionManager:
                     diff = cv2.absdiff(frame, last_frame)
                     change_percentage = np.count_nonzero(diff) / frame.size
                     if change_percentage < 0.1:
-                        await websocket.send_text(json.dumps(self.last_detection_result[client_id]))
+                        if running: await websocket.send_text(json.dumps(self.last_detection_result[client_id]))
                         continue
                     elif change_percentage > 0.8:
                         self.previous_tracked_objects[client_id].clear()
@@ -138,8 +153,10 @@ class ConnectionManager:
                     raw_detections = self.detector.detect(frame)
 
                     if not raw_detections:
-                        self.previous_tracked_objects[client_id].clear()
-                        self.previous_static_objects[client_id].clear()
+                        # Clear tracking on empty frame if desired, or keep memory
+                        # If we clear, static objects might be re-announced instantly when they reappear
+                        # self.previous_tracked_objects[client_id].clear()
+                        # self.previous_static_objects[client_id].clear()
                         return {"text": "", "boxes": []}
 
                     newly_spoken_objects = []
@@ -154,10 +171,12 @@ class ConnectionManager:
 
                         if processed_obj.track_id is not None:
                             current_tracked.add(processed_obj.track_id)
+                            # Only announce if track_id was NOT in the PREVIOUS set
                             if processed_obj.track_id not in self.previous_tracked_objects.get(client_id, set()):
                                 newly_spoken_objects.append(processed_obj)
                         else:
                             current_static.add(processed_obj.name)
+                            # For static objects (no track_id), check name
                             if processed_obj.name not in self.previous_static_objects.get(client_id, set()):
                                 newly_spoken_objects.append(processed_obj)
 
@@ -165,7 +184,7 @@ class ConnectionManager:
                     self.previous_static_objects[client_id] = current_static
                     self.last_processed_frame[client_id] = frame.copy()
 
-                    text_result = format_message(newly_spoken_objects)
+                    text_result = format_message(newly_spoken_objects, language=self.current_language)
 
                     response_boxes = []
                     for item in all_detected_objects:
@@ -189,18 +208,22 @@ class ConnectionManager:
 
                 result = await run_in_threadpool(process_frame_logic)
 
-                if result:
-                    self.last_detection_result[client_id] = result
-                    if result["text"] and result["text"] != last_log_text:
-                        logger.info(f"Speaking for {client_id[:8]}: {result['text']}")
-                        await self.voice_assistant.speak(result["text"])
-                        last_log_text = result["text"]
-                    await websocket.send_text(json.dumps(result))
-                else:
-                    await websocket.send_text(json.dumps(self.last_detection_result[client_id]))
+                if running:
+                    if result:
+                        self.last_detection_result[client_id] = result
+                        if result["text"] and result["text"] != last_log_text:
+                            logger.info(f"Speaking for {client_id[:8]}: {result['text']}")
+                            await self.voice_assistant.speak(result["text"])
+                            last_log_text = result["text"]
+                        await websocket.send_text(json.dumps(result))
+                    else:
+                        await websocket.send_text(json.dumps(self.last_detection_result[client_id]))
 
+        except WebSocketDisconnect:
+             logger.info(f"WebSocket disconnected for client {client_id}.")
         except Exception as e:
-            logger.error(f"Error in processor loop for {client_id}: {e}", exc_info=True)
+            if running:
+                logger.error(f"Error in processor loop for {client_id}: {e}", exc_info=True)
         finally:
             running = False
             receiver_task.cancel()
