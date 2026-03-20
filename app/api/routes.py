@@ -49,8 +49,9 @@ async def set_language(request: Request):
         data = await request.json()
         language = data.get("language")
         if language:
+            # We still set global voice assistant for now, but client states handle text.
             manager.voice_assistant.set_language(language)
-            manager.current_language = language # Update state
+            manager.current_language = language 
             return {"status": "ok", "language": language}
         return {"status": "error", "message": "Language not provided"}, 400
     except Exception as e:
@@ -89,18 +90,24 @@ class ConnectionManager:
         self.last_processed_frame = {}
         self.last_detection_result = {}
         self.current_language = "RUSSIAN"
+        self.client_states = {} # Map client_id -> {"language": "RUSSIAN"}
 
     async def handle_ws(self, websocket: WebSocket):
         await websocket.accept()
         client_id = str(uuid.uuid4())
         ACTIVE_CLIENTS[client_id] = websocket
-
+        
+        # Check query params for language
+        query_lang = websocket.query_params.get("lang")
+        initial_lang = query_lang if query_lang in ["ENGLISH", "RUSSIAN", "KAZAKH"] else "RUSSIAN"
+        
+        self.client_states[client_id] = {"language": initial_lang}
         self.previous_tracked_objects[client_id] = set()
         self.previous_static_objects[client_id] = set()
         self.last_processed_frame[client_id] = None
         self.last_detection_result[client_id] = {"text": "", "boxes": []}
 
-        logger.info(f"Client connected with ID: {client_id}")
+        logger.info(f"Client connected with ID: {client_id}, Lang: {initial_lang}")
         last_log_text = ""
         
         new_frame_event = asyncio.Event()
@@ -110,9 +117,23 @@ class ConnectionManager:
             nonlocal running
             try:
                 while running:
-                    data = await asyncio.wait_for(websocket.receive_bytes(), timeout=10.0)
-                    LATEST_FRAMES[client_id] = data
-                    new_frame_event.set()
+                    # Receive either bytes (frame) or text (control message)
+                    message = await asyncio.wait_for(websocket.receive(), timeout=10.0)
+                    
+                    if "bytes" in message and message["bytes"]:
+                        LATEST_FRAMES[client_id] = message["bytes"]
+                        new_frame_event.set()
+                    elif "text" in message and message["text"]:
+                        try:
+                            data = json.loads(message["text"])
+                            if data.get("action") == "set_language":
+                                new_lang = data.get("language")
+                                if new_lang in ["ENGLISH", "RUSSIAN", "KAZAKH"]:
+                                    self.client_states[client_id]["language"] = new_lang
+                                    logger.info(f"Client {client_id} changed language to {new_lang}")
+                        except json.JSONDecodeError:
+                            logger.warning(f"Invalid JSON from client {client_id}")
+                            
             except (WebSocketDisconnect, asyncio.TimeoutError):
                 logger.warning(f"Client {client_id} disconnected or timed out.")
             finally:
@@ -184,7 +205,9 @@ class ConnectionManager:
                     self.previous_static_objects[client_id] = current_static
                     self.last_processed_frame[client_id] = frame.copy()
 
-                    text_result = format_message(newly_spoken_objects, language=self.current_language)
+                    # Use client-specific language
+                    client_lang = self.client_states.get(client_id, {}).get("language", "RUSSIAN")
+                    text_result = format_message(newly_spoken_objects, language=client_lang)
 
                     response_boxes = []
                     for item in all_detected_objects:
@@ -211,10 +234,22 @@ class ConnectionManager:
                 if running:
                     if result:
                         self.last_detection_result[client_id] = result
+                        # Only speak on SERVER if this client triggered it? 
+                        # Or if Android handles speech, we rely on 'text' in JSON.
+                        # Assuming Android handles speech:
+                        
+                        # But for server-side speech (if desired):
+                        # We might need to switch global voice assistant language dynamically or ignore server speech.
+                        # For now, we update server speech too, but beware race conditions with multiple clients.
                         if result["text"] and result["text"] != last_log_text:
-                            logger.info(f"Speaking for {client_id[:8]}: {result['text']}")
-                            await self.voice_assistant.speak(result["text"])
+                            logger.info(f"Detected for {client_id[:8]}: {result['text']}")
+                            
+                            # Optional: Update server voice to match client (flawed if multi-client)
+                            # manager.voice_assistant.set_language(client_lang)
+                            # await self.voice_assistant.speak(result["text"])
+                            
                             last_log_text = result["text"]
+                        
                         await websocket.send_text(json.dumps(result))
                     else:
                         await websocket.send_text(json.dumps(self.last_detection_result[client_id]))
@@ -238,6 +273,7 @@ class ConnectionManager:
             if client_id in self.previous_static_objects: del self.previous_static_objects[client_id]
             if client_id in self.last_processed_frame: del self.last_processed_frame[client_id]
             if client_id in self.last_detection_result: del self.last_detection_result[client_id]
+            if client_id in self.client_states: del self.client_states[client_id]
             logger.info(f"Client {client_id} disconnected and cleaned up.")
 
 # Determine the base path for bundled files in PyInstaller

@@ -7,6 +7,9 @@ import colorsys
 from PIL import Image, ImageDraw, ImageFont
 import httpx
 import logging
+import tkinter as tk
+import os
+from tkinter import filedialog
 from concurrent.futures import ThreadPoolExecutor
 
 from app.domain.priorities import HIGH_PRIORITY_OBJECTS, MEDIUM_PRIORITY_OBJECTS, LOW_PRIORITY_OBJECTS
@@ -21,17 +24,20 @@ UI_TRANSLATIONS = {
     "RUSSIAN": {
         "masks": "Маски", "boxes": "Рамки", "lang": "Язык", "quit": "Выход",
         "on": "ВКЛ", "off": "ВЫКЛ", "select_src": "Выберите источник камеры:",
-        "settings": "Настройки KOZAINEK:"
+        "settings": "Настройки KOZAINEK:",
+        "analyse_file": "Анализ фото/видео"
     },
     "ENGLISH": {
         "masks": "Masks", "boxes": "Boxes", "lang": "Lang", "quit": "Quit",
         "on": "ON", "off": "OFF", "select_src": "Select Camera Source:",
-        "settings": "KOZAINEK Settings:"
+        "settings": "KOZAINEK Settings:",
+        "analyse_file": "Analyse Photo/Video"
     },
     "KAZAKH": {
         "masks": "Маскалар", "boxes": "Рамкалар", "lang": "Тіл", "quit": "Шығу",
         "on": "ҚОСУ", "off": "ӨШІРУ", "select_src": "Камера көзін таңдаңыз:",
-        "settings": "KOZAINEK Баптаулары:"
+        "settings": "KOZAINEK Баптаулары:",
+        "analyse_file": "Фото/Бейне талдау"
     }
 }
 
@@ -88,6 +94,27 @@ class CameraService:
         except Exception as e:
             logger.error(f"Failed to set language: {e}")
 
+    def _select_file(self):
+        """Opens file dialog to select image or video."""
+        try:
+            root = tk.Tk()
+            root.withdraw() # Hide main window
+            root.attributes('-topmost', True) # Bring to front
+            root.focus_force() # Force focus
+            
+            file_path = filedialog.askopenfilename(
+                title=self._get_ui_text("analyse_file"),
+                filetypes=[
+                    ("Image/Video", "*.jpg;*.jpeg;*.png;*.bmp;*.mp4;*.avi;*.mov;*.mkv"),
+                    ("All files", "*.*")
+                ]
+            )
+            root.destroy()
+            return file_path
+        except Exception as e:
+            logger.error(f"Error opening file dialog: {e}")
+            return None
+
     async def run_gui_and_stream_manager(self):
         cv2.namedWindow(self.selection_window_name)
         
@@ -108,7 +135,7 @@ class CameraService:
                     last_camera_list_str = str(available_cameras)
 
                     num_settings_lines = 6
-                    display_height = max(300, len(available_cameras) * 30 + num_settings_lines * 25 + 120)
+                    display_height = max(300, len(available_cameras) * 30 + num_settings_lines * 25 + 160)
                     selection_image = np.zeros((display_height, 600, 3), dtype=np.uint8)
                     selection_image.fill(40)
 
@@ -137,6 +164,11 @@ class CameraService:
                     for i, cam in enumerate(available_cameras):
                         draw.text((40, y_offset), f"{i + 1}. {cam['name']}", font=self.font, fill=(200, 200, 200))
                         y_offset += 30
+                    
+                    # Add Analyse File Option
+                    draw.text((40, y_offset), f"P. {self._get_ui_text('analyse_file')}", font=self.font, fill=(100, 255, 100))
+                    y_offset += 30
+                    
                     draw.text((40, y_offset + 10), f"Q. {self._get_ui_text('quit')}", font=self.font, fill=(255, 100, 100))
 
                     selection_image = cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
@@ -152,6 +184,34 @@ class CameraService:
             elif key == ord('l') or key == ord('L'):
                 self.current_lang_idx = (self.current_lang_idx + 1) % len(self.languages)
                 await self._update_language()
+            elif key == ord('p') or key == ord('P'):
+                # Stop any active stream first
+                if self.active_stream_task:
+                    self.active_stream_task.cancel()
+                    try: await self.active_stream_task
+                    except: pass
+                    self.active_stream_task = None
+                
+                try: cv2.destroyWindow(self.stream_window_name)
+                except: pass
+
+                # Handle file selection
+                file_path = await asyncio.get_event_loop().run_in_executor(self.executor, self._select_file)
+                if file_path:
+                    logger.info(f"Selected file: {file_path}")
+                    source = {"type": "file", "path": file_path, "name": "File Analysis"}
+                    
+                    # Run stream and check exit status
+                    should_quit = await self._run_stream_task(source)
+                    
+                    if should_quit:
+                        self.exit_service_flag = True
+                        break
+                    
+                    logger.info("Returning to menu.")
+                    # Clear key buffer rigorously
+                    for _ in range(10): cv2.waitKey(1)
+                    await asyncio.sleep(0.5) 
 
             if ord('1') <= key <= ord('9'):
                 idx = int(chr(key)) - 1
@@ -163,8 +223,15 @@ class CameraService:
                         self.active_stream_task.cancel()
                         try: await self.active_stream_task
                         except: pass
+                        self.active_stream_task = None
                     
-                    self.active_stream_task = asyncio.create_task(self._run_stream_task(selected_camera))
+                    try: cv2.destroyWindow(self.stream_window_name)
+                    except: pass
+
+                    should_quit = await self._run_stream_task(selected_camera)
+                    if should_quit:
+                        self.exit_service_flag = True
+                        break
                     
             await asyncio.sleep(0.01)
 
@@ -176,7 +243,10 @@ class CameraService:
         logger.info("CameraService manager shut down.")
 
     async def _run_stream_task(self, source):
-        # We decouple frame receiving from frame display/UI handling to ensure UI is responsive
+        """
+        Runs the stream. Returns True if the application should quit (user closed window),
+        False if just returning to menu (user pressed Q).
+        """
         video_capture = None
         stream_ws = None
         detection_ws = None
@@ -187,33 +257,58 @@ class CameraService:
         self.latest_frame_received = None
         self.latest_detections = []
         self.running = True
+        is_image_file = False
+        static_image = None
+        
+        quit_app = False # Return value
 
         async def frame_receiver_loop():
-            nonlocal video_capture, stream_ws
+            nonlocal video_capture, stream_ws, static_image
             logger.info("Frame receiver loop started.")
             loop = asyncio.get_event_loop()
             
             while self.running:
                 try:
                     frame = None
-                    if video_capture:
+                    
+                    if source['type'] == 'file' and is_image_file:
+                        if static_image is None:
+                            try:
+                                static_image = await loop.run_in_executor(self.executor, cv2.imread, source['path'])
+                                if static_image is None:
+                                    logger.error(f"Failed to read image file: {source['path']}")
+                                    break
+                            except Exception as e:
+                                logger.error(f"Exception reading image: {e}")
+                                break
+                        
+                        frame = static_image
+                        await asyncio.sleep(0.1)
+                        
+                    elif video_capture:
                         ret, frame = await loop.run_in_executor(self.executor, video_capture.read)
                         if not ret:
-                            logger.warning("Failed to read frame.")
-                            break # Stop loop if local cam fails
-                        frame = cv2.flip(frame, 1)
+                            if source['type'] == 'file':
+                                await loop.run_in_executor(self.executor, video_capture.set, cv2.CAP_PROP_POS_FRAMES, 0)
+                                continue
+                            else:
+                                logger.warning("End of stream/file.")
+                                break 
+                        
+                        if source['type'] == 'local':
+                            frame = cv2.flip(frame, 1)
+                            
                     elif stream_ws:
-                        # Wait with timeout to allow checking self.running
                         try:
                             data = await asyncio.wait_for(stream_ws.recv(), timeout=1.0)
                             np_arr = np.frombuffer(data, np.uint8)
                             frame = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
                         except asyncio.TimeoutError:
-                            continue # Just check loop condition again
+                            continue 
                     
                     if frame is not None:
                         self.latest_frame_received = frame
-                        self.latest_frame_to_send = frame.copy() # For detection
+                        self.latest_frame_to_send = frame.copy() 
                     else:
                         await asyncio.sleep(0.01)
                         
@@ -241,25 +336,57 @@ class CameraService:
                     return cap
                 video_capture = await asyncio.get_event_loop().run_in_executor(self.executor, open_cam)
                 if not video_capture.isOpened():
-                    return
+                    return False
             elif source['type'] == 'remote_websocket':
                 stream_ws = await websockets.connect(source['stream_ws_url'], ping_interval=10, ping_timeout=10)
+            elif source['type'] == 'file':
+                path = source['path']
+                ext = os.path.splitext(path)[1].lower()
+                is_image_file = ext in ['.jpg', '.jpeg', '.png', '.bmp', '.tiff', '.webp']
+                
+                logger.info(f"Opening file: {path} (Image: {is_image_file})")
+                
+                if not is_image_file:
+                    video_capture = cv2.VideoCapture(path)
+                    if not video_capture.isOpened():
+                        logger.error(f"Could not open file: {path}")
+                        return False
 
             # 3. Start Receiver Background Task
             receiver_task = asyncio.create_task(frame_receiver_loop())
 
             # 4. Main UI/Display Loop (runs at ~30 FPS)
-            cv2.namedWindow(self.stream_window_name)
+            cv2.namedWindow(self.stream_window_name, cv2.WINDOW_NORMAL) 
             
+            # Initial resize for file analysis
+            if source['type'] == 'file':
+                for _ in range(10):
+                    if self.latest_frame_received is not None:
+                        h, w = self.latest_frame_received.shape[:2]
+                        if w > 1280 or h > 720:
+                            scale = min(1280/w, 720/h)
+                            cv2.resizeWindow(self.stream_window_name, int(w*scale), int(h*scale))
+                        else:
+                            cv2.resizeWindow(self.stream_window_name, w, h)
+                        break
+                    await asyncio.sleep(0.1)
+
             while self.running:
                 # Check for window close or Q
-                if cv2.getWindowProperty(self.stream_window_name, cv2.WND_PROP_VISIBLE) < 1:
+                try:
+                    if cv2.getWindowProperty(self.stream_window_name, cv2.WND_PROP_VISIBLE) < 1:
+                        # User closed window via X -> Quit App
+                        quit_app = True
+                        break
+                except:
+                    quit_app = True
                     break
                 
-                # Handle Keys - logic is now decoupled from frame arrival
-                key = cv2.waitKey(30) & 0xFF # 30ms wait ~= 33 FPS limit
+                key = cv2.waitKey(30) & 0xFF 
                 
                 if key == ord('q'):
+                    # User pressed Q -> Return to Menu
+                    quit_app = False
                     break
                 elif key == ord('m') or key == ord('M'):
                     self.draw_masks = not self.draw_masks
@@ -273,11 +400,9 @@ class CameraService:
 
                 # Display Frame if available
                 if self.latest_frame_received is not None:
-                    # Use copy to avoid modification during display
                     display_frame_copy = self.latest_frame_received.copy()
                     self.display_frame(display_frame_copy, self.latest_detections, self.stream_window_name)
                 
-                # Tiny sleep just in case, though waitKey handles delay
                 await asyncio.sleep(0.001)
 
         except Exception as e:
@@ -300,6 +425,8 @@ class CameraService:
             try: cv2.destroyWindow(self.stream_window_name)
             except: pass
             logger.info("Stream task finished cleanup.")
+            
+        return quit_app
 
     async def detection_worker(self, ws):
         logger.info("Detection worker started.")
