@@ -103,4 +103,6 @@
 
 ---
 
+## 6. Android приложения чтобы использовать как камеру
+   [скачать](https://github.com/nakhraddd/KozAInek)
 **Разработано:** Darkhan Tastanov (2026)
