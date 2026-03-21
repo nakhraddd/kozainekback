@@ -41,7 +41,7 @@ TRANSLATIONS = {
         "units": "см"
     },
     "ENGLISH": {
-        "names": {}, # Defaults to English key if not found
+        "names": {},  # Defaults to English key if not found
         "distance": {
             "close": "close", "medium": "at medium distance", "far": "far away"
         },
@@ -75,6 +75,7 @@ TRANSLATIONS = {
 # Keep this for backward compatibility if needed, aliased to Russian
 RUSSIAN_NAMES = TRANSLATIONS["RUSSIAN"]["names"]
 
+
 def format_message(processed_objects: List[ProcessedObject], language: str = "RUSSIAN") -> str:
     if not processed_objects:
         return ""
@@ -83,16 +84,16 @@ def format_message(processed_objects: List[ProcessedObject], language: str = "RU
     names_map = lang_data["names"]
     dist_map = lang_data["distance"]
     pos_map = lang_data["position"]
-    
+
     attention_prefix = ""
-    
+
     # 1. Determine Attention Prefix
     for p in processed_objects:
-        key_name = p.name 
+        key_name = p.name
         found_key = next((k for k, v in RUSSIAN_NAMES.items() if v == p.name), None)
         if found_key:
             key_name = found_key
-        
+
         if key_name in HIGH_PRIORITY_OBJECTS:
             attention_prefix = lang_data["attention"]
             break
@@ -103,30 +104,36 @@ def format_message(processed_objects: List[ProcessedObject], language: str = "RU
         key_name = p.name
         found_key = next((k for k, v in RUSSIAN_NAMES.items() if v == p.name), None)
         if found_key: key_name = found_key
-        
+
         # Translate Name
         display_name = names_map.get(key_name, key_name)
-        
+
         # Resolve Distance Key (Logic.py uses: "близко", "средне", "далеко")
         dist_key = "medium"
-        if p.distance == "близко": dist_key = "close"
-        elif p.distance == "далеко": dist_key = "far"
+        if p.distance == "близко":
+            dist_key = "close"
+        elif p.distance == "далеко":
+            dist_key = "far"
         # "средне" maps to default "medium"
-        
+
         display_dist = dist_map.get(dist_key, p.distance)
-        
+
         # Resolve Position Key (Logic.py uses: "слева", "по центру", "справа")
         pos_key = "center"
-        if p.position == "слева": pos_key = "left"
-        elif p.position == "справа": pos_key = "right"
-        elif p.position == "сверху": pos_key = "top"
-        elif p.position == "снизу": pos_key = "bottom"
-        
+        if p.position == "слева":
+            pos_key = "left"
+        elif p.position == "справа":
+            pos_key = "right"
+        elif p.position == "сверху":
+            pos_key = "top"
+        elif p.position == "снизу":
+            pos_key = "bottom"
+
         display_pos = pos_map.get(pos_key, p.position)
 
         distance_info = f"({p.distance_cm:.0f} {lang_data['units']})" if p.distance_cm is not None else ""
-        
+
         # Construct phrase
         text_parts.append(f"{display_name} {display_dist} {display_pos} {distance_info}".strip())
-    
+
     return attention_prefix + ", ".join(text_parts)

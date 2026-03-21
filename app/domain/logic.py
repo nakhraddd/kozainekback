@@ -1,5 +1,6 @@
 from app.domain.models import ProcessedObject, DetectionResult
 
+
 class SpatialAnalyzer:
     def __init__(self, frame_width: int, frame_height: int, reference_distance: float = 100.0):
         self.w = frame_width
@@ -10,7 +11,7 @@ class SpatialAnalyzer:
     def analyze(self, detection: DetectionResult) -> ProcessedObject:
         x1, y1, x2, y2 = detection.box_coordinates
         cx = x1 + ((x2 - x1) / 2)
-        
+
         pos = "по центру"
         if cx < self.w / 3:
             pos = "слева"
@@ -33,11 +34,11 @@ class SpatialAnalyzer:
         normalized_mask_points = detection.mask_points
 
         return ProcessedObject(
-            name=detection.name, 
-            position=pos, 
-            distance=dist_str, 
+            name=detection.name,
+            position=pos,
+            distance=dist_str,
             distance_cm=distance_cm,
             normalized_box=norm_box,
             normalized_mask_points=normalized_mask_points,
-            track_id=detection.track_id # Added track_id
+            track_id=detection.track_id  # Added track_id
         )

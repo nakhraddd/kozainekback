@@ -1,9 +1,11 @@
 --extra-index-url https://download.pytorch.org/whl/cu121
 
+fastapi
+uvicorn
 ultralytics
 opencv-python
 websockets
-numpy<2.0.0
+numpy
 Pillow
 pyngrok
 httpx
@@ -14,17 +16,3 @@ pyinstaller
 lapx>=0.5.5
 sounddevice
 soundfile
-
-# Upgrade to TF 2.18 to support protobuf 5
-tensorflow==2.18.0
-tf_keras>=2.18.0
-onnx2tf>=1.26.3
-ai-edge-litert>=1.2.0
-protobuf>=5.0.0
-
-# Downgrade ONNX to avoid ml_dtypes conflict with TF 2.18
-onnx==1.15.0
-onnxslim
-onnxruntime
-sng4onnx
-onnx-graphsurgeon

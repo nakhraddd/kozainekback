@@ -7,7 +7,6 @@ import asyncio
 import websockets
 import logging
 import torch
-from pyngrok import ngrok
 from app.api.routes import manager
 from app.services.camera_service import CameraService
 
@@ -54,18 +53,13 @@ async def main():
     else:
         logger.warning("CUDA is NOT available. Application will run on CPU.")
 
-    try:
-        tunnel = await asyncio.to_thread(ngrok.connect, 8000, domain="anemone-intimate-utterly.ngrok-free.app")
-        logger.info(f"Ngrok tunnel started at: {tunnel.public_url}")
-    except Exception as e:
-        logger.error(f"Failed to start ngrok tunnel: {e}", exc_info=True)
-
     logger.info("Starting camera service...")
     camera_service = CameraService()
     camera_task = asyncio.create_task(camera_service.run_gui_and_stream_manager())
     logger.info("Camera service started in background.")
 
     server = await websockets.serve(handle_client, "0.0.0.0", 8000)
+    logger.info("WebSocket server started on ws://0.0.0.0:8000")
 
     try:
         await asyncio.Future()
@@ -77,9 +71,7 @@ async def main():
         await server.wait_closed()
         if hasattr(manager, 'voice_assistant'):
             await manager.voice_assistant.shutdown()
-        ngrok.kill()
         camera_task.cancel()
-        logger.info("Ngrok tunnel shut down.")
 
 
 if __name__ == "__main__":
