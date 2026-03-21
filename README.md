@@ -65,7 +65,7 @@
 *   Веб-камера
 
 ### Инструкция
-  [скачайте](https://github.com/nakhraddd/kozainekback/releases/download/latest/Kozainek-Windows.zip)
+  [скачайте](https://github.com/nakhraddd/kozainekback/releases/)
 
   Разархивируйте содержимое
 
