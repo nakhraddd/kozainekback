@@ -787,3 +787,13 @@ app/__pycache__/main.cpython-313.pyc
 /dist/
 /build/
 /venv11/
+/venvtf/
+/yolo26n-seg.pt
+/yolov8n.onnx
+/yolov8n.pt
+/yolov8n-seg.pt
+/yolov8s.pt
+/yolov8s-seg.pt
+/yolov26n-seg.pt
+/Kozainek.spec
+/calibration_image_sample_data_20x128x128x3_float32.npy
