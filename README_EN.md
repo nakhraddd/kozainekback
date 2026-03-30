@@ -43,12 +43,7 @@ The current implementation includes an enhanced MVP with the following features:
 *   Spam protection: the same object is not announced more often than once every 4-6 seconds.
 *   Automatic announcements every 6 seconds (blind mode).
 
-### 1.8. Web Interface and Remote Access
-*   Web server based on **FastAPI**.
-*   Support for connecting remote cameras (e.g., from a smartphone) via WebSocket.
-*   Tunneling via **ngrok** for internet access.
-
-### 1.9. Visualization (for sighted assistants)
+### 1.8. Visualization (for sighted assistants)
 *   Displaying video with object bounding boxes:
     *   Red = close (dangerous).
     *   Yellow = medium distance.
